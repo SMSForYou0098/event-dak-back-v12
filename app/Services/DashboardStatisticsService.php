@@ -723,10 +723,6 @@ class DashboardStatisticsService
                 $razorpayTotalAmount = (clone $query)->where('gateway', 'razorpay')->sum('total_amount');
                 break;
 
-            case 'amusement-online':
-                $query = AmusementBooking::whereBetween('created_at', [$startDate, $endDate]);
-                break;
-
             case 'agent':
                 $query = Booking::where('booking_type', 'agent')->whereBetween('created_at', [$startDate, $endDate]);
                 if ($user->hasRole('Agent')) {
@@ -757,17 +753,6 @@ class DashboardStatisticsService
                 $cashAmount = $agentBookings->filter(fn($b) => strtolower($b->payment_method ?? '') === 'cash')->sum('total_amount');
                 $upiAmount = $agentBookings->filter(fn($b) => strtolower($b->payment_method ?? '') === 'upi')->sum('total_amount');
                 $cardAmount = $agentBookings->filter(fn($b) => strtolower($b->payment_method ?? '') === 'new banking')->sum('total_amount');
-                break;
-
-            case 'accreditation':
-                $query = AccreditationBooking::whereBetween('created_at', [$startDate, $endDate]);
-                if ($user->hasRole('Accreditation')) {
-                    $query->where('accreditation_id', $user->id);
-                }
-                break;
-
-            case 'amusement-agent':
-                $query = AmusementAgentBooking::whereBetween('created_at', [$startDate, $endDate]);
                 break;
 
             case 'pos':
@@ -808,10 +793,6 @@ class DashboardStatisticsService
                 $cardAmount = $posBookings->filter(fn($b) => strtolower($b->user->payment_method ?? '') === 'net banking')->sum('total_amount');
                 break;
 
-            case 'amusement-pos':
-                $query = AmusementPosBooking::whereBetween('created_at', [$startDate, $endDate]);
-                break;
-
             case 'pending bookings':
                 $query = PenddingBooking::whereBetween('created_at', [$startDate, $endDate]);
                 break;
@@ -842,8 +823,6 @@ class DashboardStatisticsService
                 $query->where('booking_by', $user->id);
             } elseif ($user->hasRole('Sponsor')) {
                 $query->where('sponsor_id', $user->id);
-            } elseif ($user->hasRole('Accreditation')) {
-                $query->where('accreditation_id', $user->id);
             }
         }
 
@@ -851,17 +830,13 @@ class DashboardStatisticsService
             $totalAmount = $query->sum('total_amount');
             $totalDiscount = $query->sum('discount');
 
-            if (in_array($type, ['pos', 'corporate', 'amusement-pos', 'exhibition'])) {
+            if (in_array($type, ['pos', 'corporate', 'exhibition'])) {
                 $totalTickets = $query->sum('quantity');
             } else {
                 $totalTickets = $query->count('token');
             }
 
-            if ($type == 'accreditation') {
-                $totalBookings = $query->whereNotNull('total_amount')->count();
-            } else {
-                $totalBookings = $query->whereNotNull('total_amount')->distinct('set_id')->count('set_id');
-            }
+            $totalBookings = $query->whereNotNull('total_amount')->distinct('set_id')->count('set_id');
         }
 
         $summary = [];
