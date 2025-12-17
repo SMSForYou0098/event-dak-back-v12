@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\AccreditationBooking;
 use App\Models\Ticket;
 use App\Models\User;
 use Illuminate\Http\Request;
@@ -86,25 +85,10 @@ class ImportController extends Controller
                 $docPath = $this->storeFile($extractPath . '/docs/' . $docFile, 'document/' . str_replace(' ', '_', $name));
                 $user->doc = $docPath;
             }
-
             $user->save();
 
-            $booking = new AccreditationBooking();
-            $booking->ticket_id = $ticket_id;
-            $booking->user_id = $user->id;
-            $booking->accreditation_id = Auth::user()->id ?? null;
-            $booking->token = $this->generateHexadecimalCode();
-            $ticket = Ticket::find($ticket_id);
-            $booking->amount = $ticket ? $ticket->price : 0;
-            $booking->email = $email;
-            $booking->name = $name;
-            $booking->number = $number;
-            $booking->type = $type;
-            $booking->payment_method = $payment_method;
-            $booking->discount = $discount;
-            $booking->status =  0 ;
-
-            $booking->save();
+            // Accreditation booking creation has been removed
+            // The AccreditationBooking model and table have been deleted
         }
 
         \File::deleteDirectory($extractPath);

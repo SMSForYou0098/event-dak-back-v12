@@ -9,16 +9,12 @@ use Illuminate\Support\Carbon;
 use App\Http\Resources\WeeklySalesResource;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
-use App\Models\AmusementBooking;
-use App\Models\AmusementAgentBooking;
 use App\Models\CorporateBooking;
 use App\Models\PenddingBooking;
 use App\Models\ExhibitionBooking;
 use App\Models\ScanHistory;
 use App\Models\Ticket;
 use App\Models\Event;
-use App\Models\AmusementPosBooking;
-use App\Models\AccreditationBooking;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 

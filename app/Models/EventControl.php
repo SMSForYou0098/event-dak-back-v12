@@ -31,8 +31,6 @@ class EventControl extends Model
         'pos_booking' => 'boolean',
         'complimentary_booking' => 'boolean',
         'exhibition_booking' => 'boolean',
-        'amusement_booking' => 'boolean',
-        'accreditation_booking' => 'boolean',
         'sponsor_booking' => 'boolean',
         'overnight_event' => 'boolean',
     ];

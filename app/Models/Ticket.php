@@ -67,10 +67,6 @@ class Ticket extends Model
     {
         return $this->hasMany(Booking::class)->where('booking_type', 'agent');
     }
-    public function agentAmusementBooking()
-    {
-        return $this->hasMany(AmusementAgentBooking::class);
-    }
     public function PenddingBookings()
     {
         return $this->hasMany(PenddingBooking::class);
@@ -83,17 +79,9 @@ class Ticket extends Model
     {
         return $this->hasMany(PosBooking::class);
     }
-    public function AmusementPosBooking()
-    {
-        return $this->hasMany(AmusementPosBooking::class);
-    }
     public function ExhibitionBooking()
     {
         return $this->hasMany(ExhibitionBooking::class);
-    }
-    public function AmusementBooking()
-    {
-        return $this->hasMany(AmusementBooking::class);
     }
     // public function promocode()
     // {

@@ -75,29 +75,13 @@ class User extends Authenticatable implements MustVerifyEmail
     {
         return $this->hasMany(SponsorBooking::class, 'sponsor_id');
     }
-    public function AccreditationBookingNew()
-    {
-        return $this->hasMany(AccreditationBooking::class, 'accreditation_id');
-    }
-    public function agentAmusementBookingNew()
-    {
-        return $this->hasMany(AmusementAgentBooking::class, 'agent_id');
-    }
     public function PosBooking()
     {
         return $this->hasMany(PosBooking::class);
     }
-    public function AmusementPosBooking()
-    {
-        return $this->hasMany(AmusementPosBooking::class);
-    }
     public function ExhibitionBooking()
     {
         return $this->hasMany(ExhibitionBooking::class);
-    }
-    public function AmusementBooking()
-    {
-        return $this->hasMany(AmusementBooking::class);
     }
     public function EmailTemplate()
     {

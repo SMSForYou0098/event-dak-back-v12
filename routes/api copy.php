@@ -1,13 +1,10 @@
 <?php
 
 use App\Http\Controllers\AccessAreaController;
-use App\Http\Controllers\AccreditationBookingController;
 use App\Http\Controllers\AdditionalCategoryController;
 use App\Http\Controllers\AgentController;
 use App\Http\Controllers\AgreementController;
 use App\Http\Controllers\AIDataGenerator;
-use App\Http\Controllers\AmusementAgentBookingController;
-use App\Http\Controllers\AmusementBookingController;
 use App\Http\Controllers\ImportController;
 use App\Http\Controllers\ArtistController;
 use App\Http\Controllers\AttndyController;
@@ -285,7 +282,6 @@ Route::prefix('dark')->group(function () {
                 Route::post('booking-mail/{id}', [BookingController::class, 'sendBookingMail']);
                 Route::get('agent-bookings/{id}', [BookingController::class, 'agentBooking']);
                 Route::get('sponsor-bookings/{id}', [BookingController::class, 'sponsorBooking']);
-                Route::get('accreditation-bookings/{id}', [BookingController::class, 'accreditationBooking']);
                 Route::post('/resend', [BookingController::class, 'resend']);
                 Route::delete('delete-booking/{id}/{token}', [BookingController::class, 'destroy']);
                 Route::get('restore-booking/{id}/{token}', [BookingController::class, 'restoreBooking']);

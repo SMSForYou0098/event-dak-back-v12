@@ -25,8 +25,4 @@ class PromoCode extends Model
     {
         return $this->belongsTo(Booking::class);
     }
-    public function AmusementBooking()
-    {
-        return $this->belongsTo(AmusementBooking::class);
-    }
 }

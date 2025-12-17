@@ -3,7 +3,6 @@
 namespace App\Http\Controllers;
 
 use App\Jobs\SendEventNotification;
-use App\Models\AccreditationBooking;
 use App\Models\Announcement;
 use App\Models\Booking;
 use App\Models\ComplimentaryBookings;

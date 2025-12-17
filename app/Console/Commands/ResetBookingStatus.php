@@ -2,7 +2,6 @@
 
 namespace App\Console\Commands;
 
-use App\Models\AccreditationBooking;
 use App\Models\Booking;
 use App\Models\ComplimentaryBookings;
 use App\Models\PosBooking;
@@ -30,12 +29,6 @@ class ResetBookingStatus extends Command
         foreach ($generatedBookings as $compBooking) {
             $compBooking->status = 0;
             $compBooking->save();
-        }
-
-        $AccreditationBooking = AccreditationBooking::where('type', 'season')->get();
-        foreach ($AccreditationBooking as $accreditationdata) {
-            $accreditationdata->status = 0;
-            $accreditationdata->save();
         }
 
         $posBookings = PosBooking::with(['ticketData.eventData'])->get();

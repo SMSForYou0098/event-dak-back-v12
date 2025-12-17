@@ -6,10 +6,6 @@ use App\Models\PenddingBooking;
 use App\Models\PenddingBookingsMaster;
 use App\Models\Booking;
 use App\Models\MasterBooking;
-use App\Models\AmusementPendingBooking;
-use App\Models\AmusementPendingMasterBooking;
-use App\Models\AmusementBooking;
-use App\Models\AmusementMasterBooking;
 use App\Models\Ticket;
 use App\Models\Promocode;
 use App\Models\WhatsappApi;
@@ -372,77 +368,6 @@ class BookingService
     }
 
     /**
-     * Transfer amusement bookings from pending to confirmed
-     *
-     * @param string $sessionId
-     * @param string $status
-     * @param string $paymentId
-     * @return array
-     */
-    public function transferAmusementBooking($sessionId, $status, $paymentId)
-    {
-        try {
-            $bookings = AmusementPendingBooking::where('session_id', $sessionId)->get();
-            $bookingMaster = AmusementPendingMasterBooking::where('session_id', $sessionId)->get();
-
-            if ($bookings->isEmpty()) {
-                return [
-                    'status' => false,
-                    'message' => 'No pending amusement bookings found for session: ' . $sessionId
-                ];
-            }
-
-            // Prepare notification data
-            $notificationData = $this->prepareAmusementNotificationData($bookings);
-            $masterBookingIDs = [];
-
-            // Process individual bookings
-            foreach ($bookings as $individualBooking) {
-                if ($status === 'success') {
-                    $booking = $this->createConfirmedAmusementBooking($individualBooking, $paymentId);
-                    if ($booking) {
-                        $masterBookingIDs[] = $booking->id;
-                        $individualBooking->delete();
-                    }
-                } else {
-                    $this->updatePendingAmusementBookingStatus($individualBooking, $status, $paymentId);
-                }
-            }
-
-            // Process master booking if exists
-            if ($bookingMaster->isNotEmpty() && $status === 'success') {
-                $this->createConfirmedAmusementMasterBooking($bookingMaster, $masterBookingIDs, $paymentId);
-                $bookingMaster->each->delete();
-            }
-
-            // Send notifications on success
-            if ($status === 'success' && $this->smsService && $this->whatsappService) {
-                $this->smsService->send($notificationData);
-                $this->whatsappService->send($notificationData);
-            }
-
-            return [
-                'status' => true,
-                'message' => 'Amusement booking transfer completed',
-                'transferred_bookings' => count($masterBookingIDs),
-                'payment_status' => $status
-            ];
-
-        } catch (Exception $e) {
-            Log::error('BookingService - Transfer Amusement Booking Error: ' . $e->getMessage(), [
-                'session_id' => $sessionId,
-                'status' => $status,
-                'payment_id' => $paymentId
-            ]);
-
-            return [
-                'status' => false,
-                'error' => $e->getMessage()
-            ];
-        }
-    }
-
-    /**
      * Create confirmed event booking from pending booking
      *
      * @param PenddingBooking $pendingBooking
@@ -491,54 +416,6 @@ class BookingService
     }
 
     /**
-     * Create confirmed amusement booking from pending booking
-     *
-     * @param AmusementPendingBooking $pendingBooking
-     * @param string $paymentId
-     * @return AmusementBooking|null
-     */
-    private function createConfirmedAmusementBooking($pendingBooking, $paymentId)
-    {
-        try {
-            $booking = new AmusementBooking();
-            $booking->ticket_id = $pendingBooking->ticket_id;
-            $booking->user_id = $pendingBooking->user_id;
-            $booking->gateway = $pendingBooking->gateway;
-            $booking->session_id = $pendingBooking->session_id;
-            $booking->promocode_id = $pendingBooking->promocode_id;
-            $booking->token = $pendingBooking->token;
-            $booking->payment_id = $paymentId;
-            $booking->amount = $pendingBooking->amount ?? 0;
-            $booking->email = $pendingBooking->email;
-            $booking->name = $pendingBooking->name;
-            $booking->number = $pendingBooking->number;
-            $booking->type = $pendingBooking->type;
-            $booking->dates = $pendingBooking->dates ?? now();
-            $booking->payment_method = $pendingBooking->payment_method;
-            $booking->discount = $pendingBooking->discount;
-            $booking->status = 0;
-            $booking->payment_status = 1;
-            $booking->txnid = $pendingBooking->txnid;
-            $booking->device = $pendingBooking->device;
-            $booking->base_amount = $pendingBooking->base_amount;
-            $booking->convenience_fee = $pendingBooking->convenience_fee;
-            $booking->attendee_id = $pendingBooking->attendee_id;
-            $booking->total_tax = $pendingBooking->total_tax;
-            $booking->booking_date = $pendingBooking->booking_date;
-            $booking->save();
-
-            // Handle promocode if exists
-            $this->processPromocode($booking->promocode_id);
-
-            return $booking;
-
-        } catch (Exception $e) {
-            Log::error('BookingService - Create Confirmed Amusement Booking Error: ' . $e->getMessage());
-            return null;
-        }
-    }
-
-    /**
      * Create confirmed master booking from pending master booking
      *
      * @param $bookingMaster
@@ -578,48 +455,6 @@ class BookingService
     }
 
     /**
-     * Create confirmed amusement master booking from pending master booking
-     *
-     * @param $bookingMaster
-     * @param array $bookingIds
-     * @param string $paymentId
-     * @return bool
-     */
-    private function createConfirmedAmusementMasterBooking($bookingMaster, $bookingIds, $paymentId)
-    {
-        try {
-            foreach ($bookingMaster as $entry) {
-                if (!$entry)
-                    continue;
-
-                $data = [
-                    'user_id' => $entry->user_id,
-                    'gateway' => $entry->gateway,
-                    'session_id' => $entry->session_id,
-                    'booking_id' => is_array($bookingIds) ? json_encode($bookingIds) : json_encode([$bookingIds]),
-                    'order_id' => $entry->order_id,
-                    'amount' => $entry->amount,
-                    'discount' => $entry->discount,
-                    'payment_method' => $entry->payment_method,
-                    'payment_id' => $paymentId,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ];
-
-                $master = AmusementMasterBooking::create($data);
-                if (!$master) {
-                    return false;
-                }
-            }
-            return true;
-
-        } catch (Exception $e) {
-            Log::error('BookingService - Create Confirmed Amusement Master Booking Error: ' . $e->getMessage());
-            return false;
-        }
-    }
-
-    /**
      * Update pending booking status
      *
      * @param PenddingBooking $booking
@@ -638,76 +473,12 @@ class BookingService
     }
 
     /**
-     * Update pending amusement booking status
-     *
-     * @param AmusementPendingBooking $booking
-     * @param string $status
-     * @param string $paymentId
-     */
-    private function updatePendingAmusementBookingStatus($booking, $status, $paymentId)
-    {
-        if ($status === 'failure') {
-            $booking->payment_status = 2;
-            $booking->payment_id = $paymentId;
-        } else {
-            $booking->payment_status = $status;
-        }
-        $booking->save();
-    }
-
-    /**
      * Prepare notification data for event bookings
      *
      * @param $bookings
      * @return object
      */
     private function prepareEventNotificationData($bookings)
-    {
-        $firstBooking = $bookings->first();
-        $orderId = $firstBooking->token ?? '';
-        $shortLink = $orderId;
-        $whatsappTemplate = WhatsappApi::where('title', 'garbabookingv2')->first();
-        $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-        $eventDateTime = str_replace(',', ' |', $firstBooking->ticket->event->date_range) . ' | ' .
-            $firstBooking->ticket->event->start_time . ' - ' . $firstBooking->ticket->event->end_time;
-
-        $totalQty = count($bookings);
-        $mediaurl = $firstBooking->ticket->event->thumbnail;
-
-        return (object) [
-            'name' => $firstBooking->name,
-            'number' => $firstBooking->number,
-            'templateName' => 'Booking Template online',
-            'whatsappTemplateData' => $whatsappTemplateName,
-            'mediaurl' => $mediaurl,
-            'shortLink' => $shortLink,
-            'values' => [
-                $firstBooking->name,
-                $firstBooking->number,
-                $firstBooking->ticket->event->name,
-                $totalQty,
-                $firstBooking->ticket->name,
-                $firstBooking->ticket->event->address,
-                $eventDateTime,
-            ],
-            'replacements' => [
-                ':C_Name' => $firstBooking->name,
-                ':T_QTY' => $totalQty,
-                ':Ticket_Name' => $firstBooking->ticket->name,
-                ':Event_Name' => $firstBooking->ticket->event->name,
-                ':C_number' => $firstBooking->number,
-            ]
-        ];
-    }
-
-    /**
-     * Prepare notification data for amusement bookings
-     *
-     * @param $bookings
-     * @return object
-     */
-    private function prepareAmusementNotificationData($bookings)
     {
         $firstBooking = $bookings->first();
         $orderId = $firstBooking->token ?? '';

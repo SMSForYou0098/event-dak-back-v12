@@ -32,7 +32,6 @@ Route::post('booking-mail/{id}', [BookingController::class, 'sendBookingMail']);
 Route::get('bookings/{type}/{id}', [BookingController::class, 'list']);
 Route::get('agent-bookings/{id}', [BookingController::class, 'agentBooking']);
 Route::get('sponsor-bookings/{id}', [BookingController::class, 'sponsorBooking']);
-Route::get('accreditation-bookings/{id}', [BookingController::class, 'accreditationBooking']);
 Route::post('/resend', [BookingController::class, 'resend']);
 Route::delete('delete-booking/{id}/{token}', [BookingController::class, 'destroy']);
 Route::get('restore-booking/{id}/{token}', [BookingController::class, 'restoreBooking']);

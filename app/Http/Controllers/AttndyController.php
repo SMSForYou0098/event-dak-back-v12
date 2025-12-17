@@ -3,7 +3,6 @@
 namespace App\Http\Controllers;
 
 use App\Exports\AttndyBookingExport;
-use App\Models\AccreditationBooking;
 use App\Models\Attndy;
 use App\Models\Booking;
 use App\Models\Category;

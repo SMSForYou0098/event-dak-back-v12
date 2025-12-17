@@ -5,11 +5,9 @@ namespace App\Providers;
 use Illuminate\Support\ServiceProvider;
 use App\Models\Booking;
 use App\Models\ExhibitionBooking;
-use App\Models\AmusementBooking;
 use App\Models\ComplimentaryBookings;
 use App\Models\PosBooking;
 use App\Models\MasterBooking;
-use App\Models\AmusementMasterBooking;
 
 class BookingServiceProvider extends ServiceProvider
 {
@@ -31,9 +29,6 @@ class BookingServiceProvider extends ServiceProvider
                         'ExhibitionBooking' => ExhibitionBooking::where('token', $orderId)
                             ->with(['ticket.event.user', 'attendee'])
                             ->first(),
-                        'AmusementBooking' => AmusementBooking::where('token', $orderId)
-                            ->with(['ticket.event.user', 'attendee'])
-                            ->first(),
                         'ComplimentaryBookings' => ComplimentaryBookings::where('token', $orderId)
                             ->with('ticket.event.user')
                             ->first(),
@@ -42,8 +37,6 @@ class BookingServiceProvider extends ServiceProvider
                             ->first(),
                         'MasterBooking' => MasterBooking::where('order_id', $orderId)
                             ->where('booking_type', 'online')
-                            ->first(),
-                        'AmusementMasterBooking' => AmusementMasterBooking::where('order_id', $orderId)
                             ->first(),
                         'AgentMasterBooking' => MasterBooking::where('order_id', $orderId)
                             ->where('booking_type', 'agent')
