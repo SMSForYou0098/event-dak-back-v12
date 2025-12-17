@@ -1,0 +1,61 @@
+# ------------------------------
+# Laravel / PHP
+# ------------------------------
+/vendor/
+.env
+.env.*
+!.env.example
+
+# Laravel storage & cache
+/storage/*.key
+/storage/framework/*
+!/storage/framework/.gitignore
+/storage/logs/*
+!/storage/logs/.gitignore
+/bootstrap/cache/*
+!/bootstrap/cache/.gitignore
+
+# ------------------------------
+# Node / Frontend
+# ------------------------------
+/node_modules/
+/npm-debug.log*
+/yarn-error.log*
+/pnpm-debug.log*
+
+# Vite / Mix build files
+/public/build
+/public/hot
+/public/mix-manifest.json
+
+# ------------------------------
+# IDE / Editor
+# ------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*.log
+
+# ------------------------------
+# OS files
+# ------------------------------
+.DS_Store
+Thumbs.db
+
+# ------------------------------
+# Tests & coverage
+# ------------------------------
+/coverage/
+/.phpunit.cache
+.phpunit.result.cache
+
+# ------------------------------
+# Laravel Octane
+# ------------------------------
+/storage/octane
+
+# ------------------------------
+# Misc
+# ------------------------------
+*.cache

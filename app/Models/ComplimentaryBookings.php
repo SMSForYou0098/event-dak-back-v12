@@ -1,0 +1,45 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
+
+class ComplimentaryBookings extends Model
+{
+    use HasFactory,SoftDeletes;
+    protected $fillable = [
+        'user_id',
+        'ticket_id',
+        'event_id',
+        'token',
+        'name',
+        'email',
+        'number',
+        'status',
+    ];
+    public function user()
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+    public function reportingUser()
+    {
+        return $this->belongsTo(User::class, 'reporting_user');
+    }
+    public function ticket()
+    {
+        return $this->belongsTo(Ticket::class);
+    }
+
+    public function totalBookingsCount()
+    {
+        return self::where('batch_id', $this->batch_id)->count();
+    }
+
+    public function attendee()
+{
+    return $this->belongsTo(Attndy::class, 'attendee_id', 'id');
+}
+
+}
