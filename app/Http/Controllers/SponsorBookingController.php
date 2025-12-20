@@ -14,15 +14,17 @@ use App\Models\WhatsappApi;
 use App\Services\SmsService;
 use App\Services\DateRangeService;
 use App\Services\WhatsappService;
-use Auth;
-use Illuminate\Http\Request;
-use Illuminate\Support\Carbon;
-use Maatwebsite\Excel\Facades\Excel;
-use Illuminate\Support\Str;
-
+use App\Services\SessionIdService;
 
 class SponsorBookingController extends Controller
 {
+    protected $sessionIdService;
+
+    public function __construct(SessionIdService $sessionIdService)
+    {
+        $this->sessionIdService = $sessionIdService;
+    }
+
     // List All Bookings
     public function list(Request $request, $id, DateRangeService $dateRangeService)
     {
@@ -34,7 +36,7 @@ class SponsorBookingController extends Controller
 
             // 🔹 Date filter
             $dateRange = $dateRangeService->parseDateRangeSafe($request);
-            
+
             if (isset($dateRange['error'])) {
                 return response()->json(['status' => false, 'message' => $dateRange['error']], 400);
             }
@@ -273,7 +275,7 @@ class SponsorBookingController extends Controller
             }
             $sessionId = $request->session_id;
             if (!$sessionId) {
-                $getSession = $this->generateEncryptedSessionId();
+                $getSession = $this->sessionIdService->generateEncryptedSessionId();
                 $sessionId = $getSession['original'];
             }
             if ($request->tickets['quantity'] > 0) {
@@ -693,18 +695,5 @@ class SponsorBookingController extends Controller
             $randomString .= $characters[rand(0, $charactersLength - 1)];
         }
         return $randomString;
-    }
-
-    private function generateEncryptedSessionId()
-    {
-        // Generate a random session ID
-        $originalSessionId = Str::random(32);
-        // Encrypt it
-        $encryptedSessionId = encrypt($originalSessionId);
-
-        return [
-            'original' => $originalSessionId,
-            'encrypted' => $encryptedSessionId
-        ];
     }
 }

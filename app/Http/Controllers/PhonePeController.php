@@ -9,32 +9,22 @@ use App\Services\PhonePeService;
 use App\Services\WebhookService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use App\Services\SessionIdService;
 use Illuminate\Support\Str;
 
 class PhonePeController extends Controller
 {
     protected $phonePeService;
-    protected $bookingService, $WebhookService;
+    protected $bookingService, $WebhookService, $sessionIdService;
 
-    public function __construct(PhonePeService $phonePeService, BookingService $bookingService, WebhookService $WebhookService)
+    public function __construct(PhonePeService $phonePeService, BookingService $bookingService, WebhookService $WebhookService, SessionIdService $sessionIdService)
     {
 
         $this->bookingService = $bookingService;
         // Inject PhonePeService
-        $this->WebhookService = $WebhookService;    
+        $this->WebhookService = $WebhookService;
         $this->phonePeService = $phonePeService;
-    }
-    private function generateEncryptedSessionId()
-    {
-        // Generate a random session ID
-        $originalSessionId = \Str::random(32);
-        // Encrypt it
-        $encryptedSessionId = encrypt($originalSessionId);
-
-        return [
-            'original' => $originalSessionId,
-            'encrypted' => $encryptedSessionId
-        ];
+        $this->sessionIdService = $sessionIdService;
     }
 
     public function initiatePayment(Request $request)
@@ -45,18 +35,18 @@ class PhonePeController extends Controller
                 'user_id' => 'required|string',
                 'mobile_number' => 'nullable|string|size:10',
             ]);
-             $config = PhonePe::where('user_id', $request->organizer_id)
+            $config = PhonePe::where('user_id', $request->organizer_id)
                 ->first();
 
             if (! $config) {
                 $adminId = User::role('Admin')->value('id');
-                 $config = PhonePe::where('user_id', $adminId)->first();
+                $config = PhonePe::where('user_id', $adminId)->first();
             }
 
             $clientId = $config->client_id;
             $clientSecret = $config->client_secret;
             $gateway = 'phonepe';
-            $getSession = $this->generateEncryptedSessionId();
+            $getSession = $this->sessionIdService->generateEncryptedSessionId();
             $session = $getSession['original'];
             $setId = strtoupper('SET-' . Str::random(10));
             // $redirectUrl = url('/api/payment-response/' . $gateway . '/' . $request->event_id . '/' . $session);
@@ -72,7 +62,7 @@ class PhonePeController extends Controller
                 'client_id' => $clientId,
                 'client_secret' => $clientSecret,
                 'redirect_url' => $successUrl,
-              	"message" => $session,
+                "message" => $session,
                 'failure_url' => $failureUrl,
                 'cancel_url' => $cancelUrl,
                 'environment' => 'production',
@@ -84,7 +74,7 @@ class PhonePeController extends Controller
             //return $this->config = config('phonepe');
             $response = $this->phonePeService->createPayment($paymentData);
 
-            $bookings = $this->WebhookService->store($request, $session, $txnid,$setId,'phonepe');
+            $bookings = $this->WebhookService->store($request, $session, $txnid, $setId, 'phonepe');
             // $bookings = $this->bookingService->storePendingBookings($request, $session, $txnid,'phonepe');
             if ($bookings['status'] == true) {
                 if ($response['success']) {
@@ -106,7 +96,6 @@ class PhonePeController extends Controller
             } else {
                 return response()->json(['status' => false, 'message' => 'Payment Failed'], 400);
             }
-
         } catch (\Exception $e) {
             Log::error('Payment initiation error: ' . $e->getMessage());
             return response()->json([
@@ -139,7 +128,6 @@ class PhonePeController extends Controller
                     'message' => 'Callback validation failed'
                 ], 400);
             }
-
         } catch (\Exception $e) {
             Log::error('Callback handling error: ' . $e->getMessage());
             return response()->json([
@@ -170,7 +158,6 @@ class PhonePeController extends Controller
             }
 
             return redirect('/payment/failed')->with('error', 'Invalid transaction');
-
         } catch (\Exception $e) {
             Log::error('Redirect handling error: ' . $e->getMessage());
             return redirect('/payment/failed')->with('error', 'Payment processing failed');
@@ -192,7 +179,6 @@ class PhonePeController extends Controller
                 'status' => $response['status'] ?? 'UNKNOWN',
                 'error' => $response['error'] ?? null
             ]);
-
         } catch (\Exception $e) {
             Log::error('Status check error: ' . $e->getMessage());
             return response()->json([

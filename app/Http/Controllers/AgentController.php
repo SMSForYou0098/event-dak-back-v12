@@ -6,33 +6,51 @@ use App\Exports\AgentBookingExport;
 use App\Models\Booking;
 use App\Models\MasterBooking;
 use App\Models\Balance;
-use App\Models\BookingTax;
 use App\Models\Event;
-use App\Models\EventSeatStatus;
 use App\Models\Ticket;
 use App\Models\User;
-use App\Models\WhatsappApi;
-use App\Services\SmsService;
+use App\Services\BookingWithLockingService;
+use App\Services\BookingTaxService;
+use App\Services\EventSeatStatusService;
+use App\Services\SeatLockingService;
 use App\Services\WebhookService;
-use App\Services\WhatsappService;
+use App\Jobs\SendBookingAlertJob;
+use App\Services\SessionIdService;
 use Auth;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Maatwebsite\Excel\Facades\Excel;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\DB;
 
 class AgentController extends Controller
 {
-
     protected $WebhookService;
-    public function __construct(WebhookService $WebhookService)
-    {
+    protected $eventSeatStatusService;
+    protected $seatLockingService;
+    protected $bookingWithLockingService;
+    protected $bookingTaxService;
+    protected $sessionIdService;
+
+    public function __construct(
+        WebhookService $WebhookService,
+        EventSeatStatusService $eventSeatStatusService,
+        SeatLockingService $seatLockingService,
+        BookingWithLockingService $bookingWithLockingService,
+        BookingTaxService $bookingTaxService,
+        SessionIdService $sessionIdService
+    ) {
         $this->WebhookService = $WebhookService;
+        $this->eventSeatStatusService = $eventSeatStatusService;
+        $this->seatLockingService = $seatLockingService;
+        $this->bookingWithLockingService = $bookingWithLockingService;
+        $this->bookingTaxService = $bookingTaxService;
+        $this->sessionIdService = $sessionIdService;
     }
 
 
-    public function store(Request $request, $type, $id, SmsService $smsService, WhatsappService $whatsappService)
+    public function store(Request $request, $type)
     {
         try {
             $user = auth()->user();
@@ -58,12 +76,34 @@ class AgentController extends Controller
                     ], 400);
                 }
             }
-
             // 🔹 Step 2: Initialize Data - SESSION ID ONCE FOR ALL TICKETS
-            $sessionId = $request->session_id ?? $this->generateEncryptedSessionId()['original'];
+            $sessionId = $request->session_id ?? $this->sessionIdService->generateEncryptedSessionId()['original'];
+
+            //  SEAT VALIDATION PHASE - CHECK BEFORE ANY BOOKING
+            $seating_module = $request->seating_module;
+            // return $seating_module;
+            if ($seating_module || $seating_module === 'true') {
+
+                $validation = $this->eventSeatStatusService->validateSeatsBeforeBooking(
+                    $request->tickets,
+                    $this->seatLockingService,
+                    $sessionId
+                );
+                // return $validation;
+                if (!$validation['valid']) {
+                    return response()->json([
+                        'status' => false,
+                        'meta' => 409,
+                        'seats' => $validation['unavailable_seat_ids'],
+                        'message' => $validation['message']
+                    ], 409);
+                }
+            }
+
+            DB::beginTransaction();
+            // $sessionId already defined above
             $setId = strtoupper('SET-' . Str::random(10));
             $bookings = [];
-            $masterBookings = [];
             $totalAmount = 0;
 
             // 🔹 Step 3: Loop tickets
@@ -138,32 +178,27 @@ class AgentController extends Controller
                     $booking->save();
 
                     // 🔥 Booking Tax
-                    BookingTax::create([
-                        'booking_id' => $booking->id,
-                        'type' => 'agent',
-                        'base_amount' => $ticketData['baseAmount'] ?? 0,
-                        'discount' => $booking->discount ?? 0,
-                        'central_gst' => $ticketData['centralGST'] ?? 0,
-                        'state_gst' => $ticketData['stateGST'] ?? 0,
-                        'total_tax' => $ticketData['totalTax'] ?? 0,
-                        'convenience_fee' => $ticketData['convenienceFee'] ?? 0,
-                        'final_amount' => $ticketData['finalAmount'] ?? 0,
-                        'total_final_amount' => $ticketData['totalFinalAmount'] ?? 0,
-                        'total_base_amount' => $ticketData['totalBaseAmount'] ?? 0,
-                        'total_central_GST' => $ticketData['totalCentralGST'] ?? 0,
-                        'total_state_GST' => $ticketData['totalStateGST'] ?? 0,
-                        'total_tax_total' => $ticketData['totalTaxTotal'] ?? 0,
-                        'total_convenience_fee' => $ticketData['totalConvenienceFee'] ?? 0,
-                    ]);
+                    // 🔥 Booking Tax
+                    $this->bookingTaxService->createBookingTax(
+                        $booking->id,
+                        'agent',
+                        $ticketData,
+                        $booking->discount ?? 0
+                    );
 
                     // 🔥 UPDATE ESS TABLE (Seat Booked) - only for seated tickets
                     if ($hasSeats && !empty($seat['seat_id'])) {
-                        $ess = EventSeatStatus::where('seat_id', $seat['seat_id'])->first();
-                        if ($ess) {
-                            $ess->status = 1;
-                            $ess->booking_id = $booking->id;
-                            $ess->save();
+                        $ess = $this->eventSeatStatusService->markSeatAsBooked(
+                            $seat,
+                            $booking->id,
+                            $ticket->id,
+                            $ticket->event_id,
+                            $ticket->event->event_key ?? null,
+                            $type,
+                            $sessionId
+                        );
 
+                        if ($ess) {
                             $booking->ess_id = $ess->id;
                             $booking->save();
                         }
@@ -205,8 +240,11 @@ class AgentController extends Controller
             // 🔹 Deduct Agent Credits
             $this->deductAgentCredits($user, $latestBalance, $totalAmount);
 
-            // 🔹 Send SMS / WhatsApp
-            $this->sentAlert($bookings, $smsService, $whatsappService);
+            DB::commit();
+
+            // 🔹 Send SMS / WhatsApp (Async via Job)
+            $bookingIds = collect($bookings)->pluck('id')->toArray();
+            SendBookingAlertJob::dispatch($bookingIds, 'agent');
 
 
             // 🔹 Step 6: Format Response using master_token
@@ -275,98 +313,12 @@ class AgentController extends Controller
                 'set_id' => $setId,
             ], 200);
         } catch (\Exception $e) {
+            DB::rollBack();
             return response()->json([
                 'status' => false,
                 'message' => 'Failed to book tickets',
                 'error' => $e->getMessage(),
             ], 500);
-        }
-    }
-
-    private function sentAlert($bookings, $smsService, $whatsappService)
-    {
-        if (!empty($bookings)) {
-
-            // 🔥 Fetch fresh booking so updated master_token loads
-            $firstBooking = Booking::with('ticket.event')
-                ->where('id', $bookings[0]->id)
-                ->first();
-
-            $ticket = $firstBooking->ticket;
-            $event = $ticket->event;
-
-            $whatsappTemplate = WhatsappApi::where('title', 'Agent Booking')->first();
-            $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-            // -----------------------------------------
-            // 🔥 ORDER-ID PERFECT LOGIC
-            // -----------------------------------------
-
-            // Default: token
-            $orderId = $firstBooking->token;
-
-            // Case 1 → master_token exists: ALWAYS use master_token
-            if (!empty($firstBooking->master_token)) {
-                $orderId = $firstBooking->master_token;
-            }
-
-            // Case 2 → multiple ticket_ids inside same set → use set_id
-            else {
-                $bookingsWithSameSetId = collect($bookings)->where('set_id', $firstBooking->set_id);
-                $uniqueTicketIds = $bookingsWithSameSetId->pluck('ticket_id')->unique();
-
-                if (!empty($firstBooking->set_id) && $uniqueTicketIds->count() > 1) {
-                    $orderId = $firstBooking->set_id;
-                }
-            }
-
-            // -----------------------------------------
-
-            $shortLinksms = "t.getyourticket.in/t/{$orderId}";
-
-            $dates = explode(',', $event->date_range);
-            $formattedDates = array_map(fn($d) => \Carbon\Carbon::parse($d)->format('d-m-Y'), $dates);
-            $eventDateTime = implode(' | ', $formattedDates) . ' | ' . $event->start_time . ' - ' . $event->end_time;
-
-            $ticketSummary = collect($bookings)
-                ->groupBy('ticket_id')
-                ->map(function ($items) {
-                    $ticketName = $items->first()->ticket->name ?? 'Unknown Ticket';
-                    $qty = $items->count();
-                    return "{$ticketName} x{$qty}";
-                })
-                ->implode(' | ');
-
-            $data = (object) [
-                'name' => $firstBooking->name,
-                'number' => $firstBooking->number,
-                'templateName' => 'Agent Booking Template',
-                'whatsappTemplateData' => $whatsappTemplateName,
-                'shortLink' => $orderId,
-                'insta_whts_url' => $event->insta_whts_url ?? 'helloinsta',
-                'mediaurl' => $event->eventMedia->thumbnail,
-                'values' => [
-                    $firstBooking->name,
-                    $firstBooking->number,
-                    $event->name,
-                    count($bookings),
-                    $ticketSummary,
-                    $event->venue->address,
-                    $eventDateTime,
-                    $event->whts_note ?? 'hello',
-                ],
-                'replacements' => [
-                    ':C_Name' => $firstBooking->name,
-                    ':T_QTY' => count($bookings),
-                    ':Ticket_Name' => $ticketSummary,
-                    ':Event_Name' => $event->name,
-                    ':Event_Date' => $eventDateTime,
-                    ':S_Link' => $shortLinksms,
-                ],
-            ];
-
-            $smsService->send($data);
-            $whatsappService->send($data);
         }
     }
 
@@ -890,16 +842,16 @@ class AgentController extends Controller
         ]);
     }
 
-    private function generateEncryptedSessionId()
-    {
-        // Generate a random session ID
-        $originalSessionId = Str::random(32);
-        // Encrypt it
-        $encryptedSessionId = encrypt($originalSessionId);
+    // private function generateEncryptedSessionId()
+    // {
+    //     // Generate a random session ID
+    //     $originalSessionId = Str::random(32);
+    //     // Encrypt it
+    //     $encryptedSessionId = encrypt($originalSessionId);
 
-        return [
-            'original' => $originalSessionId,
-            'encrypted' => $encryptedSessionId
-        ];
-    }
+    //     return [
+    //         'original' => $originalSessionId,
+    //         'encrypted' => $encryptedSessionId
+    //     ];
+    // }
 }

@@ -3,21 +3,40 @@
 namespace App\Http\Controllers;
 
 use App\Exports\PosExport;
-use App\Models\BookingTax;
-use App\Models\EventSeatStatus;
+use App\Jobs\SendBookingAlertJob;
 use App\Models\PosBooking;
 use App\Models\Ticket;
+use App\Services\BookingWithLockingService;
+use App\Services\BookingTaxService;
 use App\Services\DateRangeService;
+use App\Services\EventSeatStatusService;
 use App\Services\PermissionService;
-use Carbon\Carbon;
+use App\Services\SeatLockingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Maatwebsite\Excel\Facades\Excel;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\DB;
 
 // its laravel
 class PosController extends Controller
 {
+    protected $eventSeatStatusService;
+    protected $seatLockingService;
+    protected $bookingWithLockingService;
+    protected $bookingTaxService;
+
+    public function __construct(
+        EventSeatStatusService $eventSeatStatusService,
+        SeatLockingService $seatLockingService,
+        BookingWithLockingService $bookingWithLockingService,
+        BookingTaxService $bookingTaxService
+    ) {
+        $this->eventSeatStatusService = $eventSeatStatusService;
+        $this->seatLockingService = $seatLockingService;
+        $this->bookingWithLockingService = $bookingWithLockingService;
+        $this->bookingTaxService = $bookingTaxService;
+    }
 
     public function index(Request $request, $id, DateRangeService $dateRangeService, PermissionService $permissionService)
     {
@@ -37,7 +56,7 @@ class PosController extends Controller
 
         // 🗓 Date Filtering Logic
         $dateRange = $dateRangeService->parseDateRangeSafe($request);
-        
+
         if (isset($dateRange['error'])) {
             return response()->json(['status' => false, 'message' => $dateRange['error']], 400);
         }
@@ -242,12 +261,35 @@ class PosController extends Controller
     public function create(Request $request)
     {
         try {
+            $user = auth()->user();
+            $isAdminOrOrganizer = $user->hasRole('Admin') || $user->hasRole('Organizer');
+
+            // 🔥 SEAT VALIDATION PHASE - CHECK BEFORE ANY BOOKING
+            if ($request->seating_module === true || $request->seating_module === 'true') {
+                $sessionId = $request->sessionId ?? uniqid('pos_', true);
+
+                $validation = $this->eventSeatStatusService->validateSeatsBeforeBooking(
+                    $request->tickets,
+                    $this->seatLockingService,
+                    $sessionId
+                );
+
+                if (!$validation['valid']) {
+                    return response()->json([
+                        'status' => false,
+                        'meta' => 409,
+                        'message' => $validation['message'],
+                        'seats' => $validation['unavailable_seat_ids'] ?? []
+                    ], 409);
+                }
+            }
+
+            // ✅ ALL VALIDATIONS PASSED - NOW PROCEED WITH BOOKING
+            DB::beginTransaction();
             $bookings = [];
             $token = $this->generateHexadecimalCode();
             $setId = strtoupper('SET-' . Str::random(10));
-
-            $user = auth()->user(); // 🔹 Get the logged-in user
-            $isAdminOrOrganizer = $user->hasRole('Admin') || $user->hasRole('Organizer');
+            $sessionId = uniqid('pos_', true);
 
             foreach ($request->tickets as $ticketData) {
                 $ticket = Ticket::findOrFail($ticketData['id']);
@@ -288,13 +330,10 @@ class PosController extends Controller
                 $booking->total_amount = $ticketData['totalFinalAmount'] ?? 0;
                 $booking->seating = (isset($ticketData['seats']) && !empty($ticketData['seats'])) ? 1 : 0;
 
-
                 // 🔹 Payment method logic
                 if ($isAdminOrOrganizer) {
-                    // Take from request if admin or organizer
                     $booking->payment_method = $request->payment_method;
                 } else {
-                    // Take from user table if POS or other
                     $booking->payment_method = $user->payment_method ?? 'cash';
                 }
 
@@ -308,37 +347,28 @@ class PosController extends Controller
                 $ticket->remaining_count = $newRemaining;
                 $ticket->sold_out = $newRemaining <= 0 ? 1 : 0;
                 $ticket->save();
+
                 // 🔹 Save tax details
-                BookingTax::create([
-                    'booking_id'      => $booking->id,
-                    'type'            => 'POS',
-                    'base_amount'     => $ticketData['baseAmount'] ?? 0,
-                    'central_gst'     => $ticketData['centralGST'] ?? 0,
-                    'state_gst'       => $ticketData['stateGST'] ?? 0,
-                    'total_tax'       => $ticketData['totalTax'] ?? 0,
-                    'convenience_fee' => $ticketData['convenienceFee'] ?? 0,
-                    'total_central_GST' => $ticketData['totalCentralGST'] ?? 0,
-                    'total_convenience_fee' => $ticketData['totalConvenienceFee'] ?? 0,
-                    'total_base_amount' => $ticketData['totalBaseAmount'] ?? 0,
-                    'total_state_GST' => $ticketData['totalStateGST'] ?? 0,
-                    'total_tax_total' => $ticketData['totalTaxTotal'] ?? 0,
-                ]);
+                // 🔹 Save tax details
+                $this->bookingTaxService->createBookingTax(
+                    $booking->id,
+                    'POS',
+                    $ticketData,
+                    $booking->discount ?? 0
+                );
 
                 if (!empty($ticketData['seats'])) {
-
                     foreach ($ticketData['seats'] as $seat) {
-
-                        EventSeatStatus::create([
-                            'event_id'   => $ticket->event_id,
-                            'event_key'  => $event->event_key ?? null,
-                            'seat_id'    => $seat['seat_id'] ?? null,
-                            'section_id' => $this->extractNumericId($seat['section_id'] ?? null),
-                            'ticket_id'  => $ticket->id,
-                            'booking_id' => $booking->id,
-                            'status'     => 1,
-                            'type'       => 'POS',
-                            'seat_name'  => $seat['seat_name'] ?? null,
-                        ]);
+                        // ✅ USE SERVICE: Update or create seat status (Agent pattern)
+                        $this->eventSeatStatusService->markSeatAsBooked(
+                            $seat,
+                            $booking->id,
+                            $ticket->id,
+                            $ticket->event_id,
+                            $event->event_key ?? null,
+                            'POS',
+                            $sessionId
+                        );
                     }
                 }
 
@@ -353,12 +383,19 @@ class PosController extends Controller
                 $bookings[] = $booking;
             }
 
+            DB::commit();
+
+            // 🔹 Send SMS / WhatsApp Alerts Asynchronously
+            $bookingIds = collect($bookings)->pluck('id')->toArray();
+            SendBookingAlertJob::dispatch($bookingIds, 'pos');
+
             return response()->json([
                 'status' => true,
                 'message' => 'Tickets booked successfully',
                 'bookings' => $bookings
             ], 201);
         } catch (\Exception $e) {
+            DB::rollBack();
             return response()->json([
                 'status' => false,
                 'message' => 'Failed to book tickets',
@@ -504,13 +541,13 @@ class PosController extends Controller
         // Date filtering
         if ($request->has('date')) {
             $dateRange = $dateRangeService->parseDateRange($request, null, false);
-            
+
             if ($dateRange === null) {
                 // No date provided, skip date filtering
             } else {
                 $startDate = $dateRange['startDate'];
                 $endDate = $dateRange['endDate'];
-                
+
                 // Use whereDate for single day, whereBetween for range
                 if ($startDate->isSameDay($endDate)) {
                     $query->whereDate('created_at', $startDate->toDateString());

@@ -5,26 +5,18 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use App\Models\PenddingBooking;
 use App\Services\BookingService;
+use App\Services\SessionIdService;
 use Illuminate\Support\Str;
 
 class CashfreeController extends Controller
 {
     protected $bookingService;
+    protected $sessionIdService;
 
-    public function __construct(BookingService $bookingService)
+    public function __construct(BookingService $bookingService, SessionIdService $sessionIdService)
     {
         $this->bookingService = $bookingService;
-    }
-
-    private function generateEncryptedSessionId()
-    {
-        $originalSessionId = Str::random(32);
-        $encryptedSessionId = encrypt($originalSessionId);
-
-        return [
-            'original' => $originalSessionId,
-            'encrypted' => $encryptedSessionId
-        ];
+        $this->sessionIdService = $sessionIdService;
     }
 
     /**
@@ -41,7 +33,7 @@ class CashfreeController extends Controller
 
         // Generate unique IDs
         $gateway  = 'cashfree';
-        $session  = $this->generateEncryptedSessionId()['original'];
+        $session  = $this->sessionIdService->generateEncryptedSessionId()['original'];
         $categoryData = $request->category;
         $orderId    = 'order_' . rand(1111111111, 9999999999);
         $customerId = 'customer_' . rand(111111111, 999999999);

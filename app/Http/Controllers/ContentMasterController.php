@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\ContentMasterUpdated;
 use App\Models\ContentMaster;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -83,6 +84,8 @@ class ContentMasterController extends Controller
                 'type' => $request->type,
             ]);
 
+            event(new ContentMasterUpdated($contentMaster, 'created'));
+
             return response()->json([
                 'status' => true,
                 'message' => 'Content created successfully',
@@ -159,6 +162,9 @@ class ContentMasterController extends Controller
                 'type' => $request->type ?? $contentMaster->type,
             ]);
 
+            // Broadcast the update event
+            event(new ContentMasterUpdated($contentMaster, 'updated'));
+
             return response()->json([
                 'status' => true,
                 'message' => 'Content updated successfully',
@@ -195,6 +201,9 @@ class ContentMasterController extends Controller
             }
 
             $contentMaster->delete();
+
+            // Broadcast the delete event
+            event(new ContentMasterUpdated($contentMaster, 'deleted'));
 
             return response()->json([
                 'status' => true,

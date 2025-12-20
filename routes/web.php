@@ -26,7 +26,6 @@ Route::get('/s/{shortCode}', [ShortUrlController::class, 'redirectUrl']);
 Route::get('/email/verify/{id}/{hash}', [EmailVerificationController::class, 'verify'])
     ->name('verification.verify');
 
-
 Route::any('{any}', function () {
     return redirect()->away('https://getyourticket.in');
 })->where('any', '.*');

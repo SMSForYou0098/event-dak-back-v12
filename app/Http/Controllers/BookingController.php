@@ -1265,9 +1265,9 @@ class BookingController extends Controller
 
     private function sendBookingNotification($booking, $isMaster = false, $qty = 1, $orderId = null)
     {
-        $smsService = new \App\Services\SmsService();
-        $whatsappService = new \App\Services\WhatsappService();
-        $whatsappTemplate = \App\Models\WhatsappApi::where('title', 'Online Booking')->first();
+        $smsService = new SmsService();
+        $whatsappService = new WhatsappService();
+        $whatsappTemplate = WhatsappApi::where('title', 'Online Booking')->first();
         $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
 
         $event = $booking->ticket->event ?? null;

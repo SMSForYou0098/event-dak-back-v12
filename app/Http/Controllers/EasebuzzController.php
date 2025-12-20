@@ -8,17 +8,18 @@ use App\Models\User;
 use App\Services\SmsService;
 use App\Services\WebhookService;
 use App\Services\WhatsappService;
+use App\Services\SessionIdService;
 use Illuminate\Support\Str;
 
 
 class EasebuzzController extends Controller
 {
 
-    protected $smsService, $whatsappService, $WebhookService;
+    protected $smsService, $whatsappService, $WebhookService, $sessionIdService;
 
     protected $config;
     protected $url;
-    public function __construct(SmsService $smsService, WhatsappService $whatsappService, WebhookService $WebhookService)
+    public function __construct(SmsService $smsService, WhatsappService $whatsappService, WebhookService $WebhookService, SessionIdService $sessionIdService)
     {
         // Retrieve configuration from the database
         $config = EasebuzzConfig::first();
@@ -31,19 +32,7 @@ class EasebuzzController extends Controller
         $this->smsService = $smsService;
         $this->whatsappService = $whatsappService;
         $this->WebhookService = $WebhookService;
-    }
-
-    private function generateEncryptedSessionId()
-    {
-        // Generate a random session ID
-        $originalSessionId = \Str::random(32);
-        // Encrypt it
-        $encryptedSessionId = encrypt($originalSessionId);
-
-        return [
-            'original' => $originalSessionId,
-            'encrypted' => $encryptedSessionId
-        ];
+        $this->sessionIdService = $sessionIdService;
     }
 
     public function initiatePayment(Request $request)
@@ -53,7 +42,7 @@ class EasebuzzController extends Controller
         try {
             include_once(app_path('Services/easebuzz_helper.php'));
 
-            $getSession = $this->generateEncryptedSessionId();
+            $getSession = $this->sessionIdService->generateEncryptedSessionId();
             $session = $getSession['original'];
             $setId = strtoupper('SET-' . Str::random(10));
 

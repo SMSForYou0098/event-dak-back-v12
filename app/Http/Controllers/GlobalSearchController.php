@@ -4,181 +4,204 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\Category;
-use Illuminate\Http\Request;
 use App\Models\Event;
 use App\Models\User;
+use Illuminate\Http\Request;
 
 class GlobalSearchController extends Controller
 {
+    private const LIVE_KEYWORDS = ['live', 'liveevent', 'live-event', 'today'];
+    private const OFFER_KEYWORDS = ['offer', 'offers', 'sale', 'sales'];
+    private const FREE_KEYWORDS = ['free'];
+    private const STOPWORDS = ['in', 'the', 'a', 'an', 'of', 'and', 'for', 'on', 'at'];
 
     public function search(Request $request)
     {
         $query = Event::query()
-            ->select('id', 'name', 'category', 'event_type', 'user_id', 'event_key', 'venue_id', 'date_range', 'entry_time', 'start_time', 'end_time')
+            ->select([
+                'id',
+                'name',
+                'category',
+                'event_type',
+                'user_id',
+                'event_key',
+                'venue_id',
+                'start_date',
+                'end_date',
+                'entry_time',
+                'start_time',
+                'end_time'
+            ])
             ->with([
-                'eventMedia' => function ($q) {
-                    $q->select('event_id', 'thumbnail');
-                },
-                'venueEvent' => function ($q) {
-                    $q->select('org_id', 'city', 'state', 'address'); // Make sure 'city' exists in Venue table
-                },
+                'eventMedia:event_id,thumbnail',
+                'venueEvent:org_id,city,state,address',
                 'organizer:id,name,organisation',
                 'categoryDatanew:id,title',
                 'eventControls:id,event_id,status',
-                'tickets:id,event_id,price,sale'
+                'tickets:id,event_id,price,sale,sale_start_date,sale_end_date'
             ]);
 
+        $this->applyFilters($query, $request);
 
-        $hasCategory = $request->filled('event_category');
-        $hasSearch   = $request->has('search') && trim($request->search) !== '';
-
-        // Stopwords to ignore
-        $stopwords = ['in', 'the', 'a', 'an', 'of', 'and', 'for', 'on', 'at'];
-
-        if ($hasCategory || $hasSearch) {
-            $query->where(function ($q) use ($request, $hasCategory, $hasSearch, $stopwords) {
-
-                // ✅ Category filter
-                if ($hasCategory) {
-                    $categoryNames = array_map('trim', explode(',', $request->event_category));
-                    $categoryIds = Category::whereIn('title', $categoryNames)->pluck('id');
-
-                    if ($categoryIds->count() > 0) {
-                        $q->orWhereIn('category', $categoryIds);
-                    }
-                }
-
-                // ✅ Search filter
-                if ($hasSearch) {
-                    $keywords = array_filter(explode(' ', trim($request->search)));
-
-                    $q->orWhere(function ($sq) use ($keywords, $stopwords) {
-                        foreach ($keywords as $word) {
-                            $word = strtolower(trim($word));
-                            if ($word === '' || in_array($word, $stopwords)) continue;
-
-                            // 🗓️ TODAY → events happening today
-                            if (in_array($word, ['live', 'liveevent', 'live-event', 'eventlive', 'live events', 'events live', 'today', 'happening today'])) {
-                                $sq->orWhere(function ($liveQ) {
-                                    $liveQ->whereRaw("
-                                                        (
-                                                            CASE 
-                                                                WHEN date_range LIKE '%,%' THEN 
-                                                                    STR_TO_DATE(SUBSTRING_INDEX(date_range, ',', 1), '%Y-%m-%d') <= CURDATE()
-                                                                    AND STR_TO_DATE(SUBSTRING_INDEX(date_range, ',', -1), '%Y-%m-%d') >= CURDATE()
-                                                                ELSE 
-                                                                    STR_TO_DATE(date_range, '%Y-%m-%d') = CURDATE()
-                                                            END
-                                                        )
-                                                    ")
-                                        ->whereHas('eventControls', function ($ctrlQ) {
-                                            $ctrlQ->where('status', "1");   // ✅ ACTIVE EVENTS ONLY
-                                        });
-                                });
-
-                                continue;
-                            }
-
-
-                            // 🟠 OFFER / SALE
-                            if (in_array($word, ['offer', 'offers', 'sale', 'sales'])) {
-                                $sq->orWhere(function ($offerQ) {
-                                    // 🔹 Offer date: active or upcoming
-                                    $offerQ->where(function ($dateQ) {
-                                        $dateQ->whereRaw("
-                                        (
-                                            CASE 
-                                                WHEN date_range LIKE '%,%' THEN 
-                                                    STR_TO_DATE(SUBSTRING_INDEX(date_range, ',', -1), '%Y-%m-%d') >= CURDATE()
-                                                ELSE 
-                                                    STR_TO_DATE(date_range, '%Y-%m-%d') >= CURDATE()
-                                            END
-                                        )
-                                    ");
-                                    })
-                                        // 🔹 Tickets: sale = 1 and active or upcoming sale_date
-                                        ->whereHas('tickets', function ($ticketQ) {
-                                            $ticketQ->where('sale', 1)
-                                                ->where(function ($ticketDateQ) {
-                                                    $ticketDateQ->whereRaw("
-                                        (
-                                            CASE 
-                                                WHEN sale_date LIKE '%,%' THEN 
-                                                    STR_TO_DATE(SUBSTRING_INDEX(sale_date, ',', -1), '%Y-%m-%d') >= CURDATE()
-                                                ELSE 
-                                                    STR_TO_DATE(sale_date, '%Y-%m-%d') >= CURDATE()
-                                            END
-                                        )
-                                            ");
-                                                });
-                                        });
-                                });
-
-                                continue;
-                            }
-
-
-                            // 🟣 FREE
-                            if (in_array($word, ['free', 'free event', 'free events'])) {
-                                $sq->orWhere(function ($offerQ) {
-                                    // 🔹 Only active or upcoming events
-                                    $offerQ->whereHas('eventControls', function ($ctrlQ) {
-                                        $ctrlQ->where('status', 1);
-                                    })
-                                        ->where(function ($dateQ) {
-                                            $dateQ->whereRaw("
-                                                (
-                                                    CASE 
-                                                        WHEN date_range LIKE '%,%' THEN 
-                                                            STR_TO_DATE(SUBSTRING_INDEX(date_range, ',', -1), '%Y-%m-%d') >= CURDATE()
-                                                        ELSE 
-                                                            STR_TO_DATE(date_range, '%Y-%m-%d') >= CURDATE()
-                                                    END
-                                                )
-                                            ");
-                                        })
-                                        // 🔹 Free tickets only (price = 0)
-                                        ->whereHas('tickets', function ($ticketQ) {
-                                            $ticketQ->where('price', 0);
-                                        });
-                                });
-
-                                continue;
-                            }
-
-
-
-
-                            // 🔹 Match in Event fields
-                            $sq->orWhere('name', 'like', "%{$word}%")
-                                ->orWhere('description', 'like', "%{$word}%");
-
-                            // 🔹 Match in related Venue table
-                            $sq->orWhereHas('venueEvent', function ($venueQ) use ($word) {
-                                $venueQ->where('city', 'like', "%{$word}%")
-                                    ->orWhere('state', 'like', "%{$word}%")
-                                    ->orWhere('address', 'like', "%{$word}%");
-                            });
-
-                            // 🔹 Match in related User table (organizer)
-                            $userIds = User::where('name', 'like', "%{$word}%")
-                                ->orWhere('organisation', 'like', "%{$word}%")
-                                ->pluck('id');
-
-                            if ($userIds->count() > 0) {
-                                $sq->orWhereIn('user_id', $userIds);
-                            }
-                        }
-                    });
-                }
-            });
-        }
-
-        $events = $query->get();
+        // ✅ Laravel 12.8+: Automatic Relationship Autoloading
+        $events = $query->get()->withRelationshipAutoloading();
 
         return response()->json([
             'status' => true,
             'data'   => $events
-        ], 200);
+        ]);
+    }
+
+    private function applyFilters($query, Request $request): void
+    {
+        $hasCategory = $request->filled('event_category');
+        $hasSearch = $request->filled('search');
+
+        if (!$hasCategory && !$hasSearch) {
+            return;
+        }
+
+        $query->where(function ($q) use ($request, $hasCategory, $hasSearch) {
+            if ($hasCategory) {
+                $this->applyCategoryFilter($q, $request->event_category);
+            }
+
+            if ($hasSearch) {
+                $this->applySearchFilter($q, $request->search);
+            }
+        });
+    }
+
+    private function applyCategoryFilter($query, string $categoryParam): void
+    {
+        $categoryNames = array_map('trim', explode(',', $categoryParam));
+        $categoryIds = Category::whereIn('title', $categoryNames)->pluck('id');
+
+        if ($categoryIds->isNotEmpty()) {
+            $query->orWhereIn('category', $categoryIds);
+        }
+    }
+
+    private function applySearchFilter($query, string $search): void
+    {
+        $keywords = array_filter(
+            explode(' ', strtolower(trim($search))),
+            fn($word) => $word !== '' && !in_array($word, self::STOPWORDS)
+        );
+
+        if (empty($keywords)) {
+            return;
+        }
+
+        $query->orWhere(function ($sq) use ($keywords, $search) {
+            foreach ($keywords as $word) {
+                if ($this->applySpecialFilters($sq, $word)) {
+                    continue;
+                }
+            }
+
+            $this->applyTextSearch($sq, $search);
+        });
+    }
+
+    private function applySpecialFilters($query, string $word): bool
+    {
+        if (in_array($word, self::LIVE_KEYWORDS)) {
+            $this->applyLiveEventFilter($query);
+            return true;
+        }
+
+        if (in_array($word, self::OFFER_KEYWORDS)) {
+            $this->applyOfferFilter($query);
+            return true;
+        }
+
+        if (in_array($word, self::FREE_KEYWORDS)) {
+            $this->applyFreeEventFilter($query);
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * ✅ NORMALIZED: Clean date column queries
+     * No more SPLIT_PART or CASE statements!
+     */
+    private function applyLiveEventFilter($query): void
+    {
+        $today = now()->toDateString();
+
+        $query->orWhere(function ($liveQ) use ($today) {
+            $liveQ->where('start_date', '<=', $today)
+                ->where('end_date', '>=', $today)
+                ->whereHas('eventControls', fn($q) => $q->where('status', '1'));
+        });
+    }
+
+    /**
+     * ✅ NORMALIZED: Clean offer filter
+     */
+    private function applyOfferFilter($query): void
+    {
+        $today = now()->toDateString();
+
+        $query->orWhere(function ($offerQ) use ($today) {
+            $offerQ->where('end_date', '>=', $today)
+                ->whereHas('tickets', function ($ticketQ) use ($today) {
+                    $ticketQ->where('sale', 1)
+                        ->where('sale_end_date', '>=', $today);
+                });
+        });
+    }
+
+    /**
+     * ✅ NORMALIZED: Clean free events filter
+     */
+    private function applyFreeEventFilter($query): void
+    {
+        $today = now()->toDateString();
+
+        $query->orWhere(function ($freeQ) use ($today) {
+            $freeQ->whereHas('eventControls', fn($q) => $q->where('status', 1))
+                ->where('end_date', '>=', $today)
+                ->whereHas('tickets', fn($q) => $q->where('price', 0));
+        });
+    }
+
+    /**
+     * ✅ Laravel 12: whereLike() for case-insensitive search
+     * ✅ PostgreSQL: Full-text search with GIN index
+     */
+    private function applyTextSearch($query, string $search): void
+    {
+        $searchTerm = trim($search);
+
+        // PostgreSQL Full-Text Search (requires GIN index for performance)
+        $query->orWhereRaw(
+            "to_tsvector('english', COALESCE(name, '') || ' ' || COALESCE(description, '')) 
+             @@ websearch_to_tsquery('english', ?)",
+            [$searchTerm]
+        );
+
+        // Laravel 12: whereLike() - automatically case-insensitive
+        $query->orWhereLike('name', "%{$searchTerm}%");
+
+        // Search in venue (with Laravel 12 whereLike)
+        $query->orWhereHas('venueEvent', function ($venueQ) use ($searchTerm) {
+            $venueQ->whereLike('city', "%{$searchTerm}%")
+                ->orWhereLike('state', "%{$searchTerm}%")
+                ->orWhereLike('address', "%{$searchTerm}%");
+        });
+
+        // Search by organizer
+        $userIds = User::query()
+            ->whereLike('name', "%{$searchTerm}%")
+            ->orWhereLike('organisation', "%{$searchTerm}%")
+            ->pluck('id');
+
+        if ($userIds->isNotEmpty()) {
+            $query->orWhereIn('user_id', $userIds);
+        }
     }
 }

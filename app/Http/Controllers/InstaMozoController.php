@@ -9,30 +9,19 @@ use App\Models\User;
 use App\Models\Instamojo;
 use App\Services\BookingService;
 use App\Services\WebhookService;
+use App\Services\SessionIdService;
 use Illuminate\Support\Str;
 
 class InstaMozoController extends Controller
 {
     protected $api;
 
-    protected $bookingService,$WebhookService;
-    public function __construct(BookingService $bookingService, WebhookService $WebhookService)
+    protected $bookingService, $WebhookService, $sessionIdService;
+    public function __construct(BookingService $bookingService, WebhookService $WebhookService, SessionIdService $sessionIdService)
     {
         $this->bookingService = $bookingService;
         $this->WebhookService = $WebhookService;
-    }
-
-    private function generateEncryptedSessionId()
-    {
-        // Generate a random session ID
-        $originalSessionId = \Str::random(32);
-        // Encrypt it
-        $encryptedSessionId = encrypt($originalSessionId);
-
-        return [
-            'original' => $originalSessionId,
-            'encrypted' => $encryptedSessionId
-        ];
+        $this->sessionIdService = $sessionIdService;
     }
 
     public function initiatePayment(Request $request)
@@ -41,12 +30,12 @@ class InstaMozoController extends Controller
             $instaMojoUrl = 'https://www.instamojo.com/api/1.1/payment-requests/';
 
             // Get API credentials based on organizer_id or fallback to Admin credentials
-             $config = Instamojo::where('user_id', $request->organizer_id)
+            $config = Instamojo::where('user_id', $request->organizer_id)
                 ->first();
 
             if (! $config) {
                 $adminId = User::role('Admin')->value('id');
-                 $config = Instamojo::where('user_id', $adminId)->first();
+                $config = Instamojo::where('user_id', $adminId)->first();
             }
 
 
@@ -62,8 +51,9 @@ class InstaMozoController extends Controller
             $txnid = random_int(100000000000, 999999999999);
 
             $categoryData = $request->category;
-            $session = $this->generateEncryptedSessionId()['original'];
-            $sessionId = $this->generateEncryptedSessionId()['encrypted'];
+            $sessionData = $this->sessionIdService->generateEncryptedSessionId();
+            $session = $sessionData['original'];
+            $sessionId = $sessionData['encrypted'];
             $setId = strtoupper('SET-' . Str::random(10));
             $gateway = 'instamojo';
             $request->merge(['gateway' => $gateway]);
@@ -75,18 +65,18 @@ class InstaMozoController extends Controller
                 'buyer_name' => $request->firstname,
                 'email' => $request->email,
                 'phone' => $request->phone,
-              	'surl' => url('/api/payment-response/' . $gateway . '/' . $request->event_id . '/' . $sessionId . '?status=success&category=' . urlencode($categoryData)),
-              	'furl' => url('/api/payment-response/' . $gateway . '/' . $request->event_id . '/' . $sessionId . '?status=failure&category=' . urlencode($categoryData)),
+                'surl' => url('/api/payment-response/' . $gateway . '/' . $request->event_id . '/' . $sessionId . '?status=success&category=' . urlencode($categoryData)),
+                'furl' => url('/api/payment-response/' . $gateway . '/' . $request->event_id . '/' . $sessionId . '?status=failure&category=' . urlencode($categoryData)),
                 'send_email' => 'False',
                 'webhook' => rtrim(env('NAV_DOMAIN', 'https://cricket.getyourticket.in'), '/') . '/api/payment-webhook/instamojo/vod?sessionId=' . $session . '&category=' . urlencode($categoryData),
 
-              	// 'webhook' => 'https://cricket.getyourticket.in/api/payment-webhook/instamojo/vod?sessionId=' . $session . '&category=' . urlencode($categoryData),
-              	// 'webhook' => 'https://fronx.tasteofvadodara.in/api/payment-webhook/instamojo/vod?sessionId=' . $session . '&category=' . urlencode($categoryData),
+                // 'webhook' => 'https://cricket.getyourticket.in/api/payment-webhook/instamojo/vod?sessionId=' . $session . '&category=' . urlencode($categoryData),
+                // 'webhook' => 'https://fronx.tasteofvadodara.in/api/payment-webhook/instamojo/vod?sessionId=' . $session . '&category=' . urlencode($categoryData),
                 'allow_repeated_payments' => 'False',
                 'redirect_url' => url('/api/payment-response/' . $gateway . '/' . $request->event_id . '/' . $session . '?status=success&category=' . urlencode($categoryData)),
             ];
-           $response = Http::withHeaders([
-               'X-Api-Key' => $apiKey,
+            $response = Http::withHeaders([
+                'X-Api-Key' => $apiKey,
                 'X-Auth-Token' => $authToken
             ])->post($instaMojoUrl, $postData);
 
@@ -95,11 +85,11 @@ class InstaMozoController extends Controller
             if (!empty($responseData['success']) && $responseData['success'] == true) {
                 $paymentUrl = $responseData['payment_request']['longurl'];
 
-                 $bookingResult = $this->WebhookService->store($request, $session, $txnid,$setId, $gateway);
+                $bookingResult = $this->WebhookService->store($request, $session, $txnid, $setId, $gateway);
                 //  $bookingResult = $this->bookingService->storePendingBookings($request, $session, $txnid, $gateway);
-               
-                if ($bookingResult['status'] === true)  {
-                    return response()->json(['status' => true,'result' => $responseData, 'txnid' => $txnid, 'url' => $paymentUrl]);
+
+                if ($bookingResult['status'] === true) {
+                    return response()->json(['status' => true, 'result' => $responseData, 'txnid' => $txnid, 'url' => $paymentUrl]);
                 } else {
                     return response()->json(['status' => false, 'message' => 'Payment Failed'], 400);
                 }
@@ -112,5 +102,4 @@ class InstaMozoController extends Controller
             return response()->json(['status' => false, 'message' => $e->getMessage()], 500);
         }
     }
-
 }

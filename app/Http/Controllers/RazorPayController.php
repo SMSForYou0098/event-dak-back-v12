@@ -9,29 +9,18 @@ use App\Services\BookingService;
 use App\Services\WebhookService;
 use Illuminate\Http\Request;
 use Razorpay\Api\Api;
+use App\Services\SessionIdService;
 use Illuminate\Support\Str;
 
 class RazorPayController extends Controller
 {
     protected $api;
-    protected $bookingService, $WebhookService;
-    public function __construct(BookingService $bookingService, WebhookService $WebhookService)
+    protected $bookingService, $WebhookService, $sessionIdService;
+    public function __construct(BookingService $bookingService, WebhookService $WebhookService, SessionIdService $sessionIdService)
     {
         $this->bookingService = $bookingService;
         $this->WebhookService = $WebhookService;
-    }
-
-    private function generateEncryptedSessionId()
-    {
-        // Generate a random session ID
-        $originalSessionId = \Str::random(32);
-        // Encrypt it
-        $encryptedSessionId = encrypt($originalSessionId);
-
-        return [
-            'original' => $originalSessionId,
-            'encrypted' => $encryptedSessionId
-        ];
+        $this->sessionIdService = $sessionIdService;
     }
 
     public function initiatePayment(Request $request)
@@ -54,8 +43,9 @@ class RazorPayController extends Controller
             $txnid = random_int(100000000000, 999999999999);
 
             $categoryData = $request->category;
-            $session = $this->generateEncryptedSessionId()['original'];
-            $sessionId = $this->generateEncryptedSessionId()['encrypted'];
+            $sessionData = $this->sessionIdService->generateEncryptedSessionId();
+            $session = $sessionData['original'];
+            $sessionId = $sessionData['encrypted'];
             $setId = strtoupper('SET-' . Str::random(10));
             $gateway = 'razorpay';
             $request->merge(['gateway' => $gateway]);
@@ -85,7 +75,7 @@ class RazorPayController extends Controller
             }
 
             // ✅ FIRST save as pending booking
-            $this->WebhookService->store($request, $session, $txnid,$setId, 'razorpay');
+            $this->WebhookService->store($request, $session, $txnid, $setId, 'razorpay');
             // $this->bookingService->storePendingBookings($request, $session, $txnid, 'razorpay');
 
             // ✅ THEN return order details to frontend
