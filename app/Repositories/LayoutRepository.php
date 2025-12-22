@@ -328,9 +328,10 @@ class LayoutRepository
      * Build full layout response data
      * @param Layout $layout
      * @param string|null $eventId
+     * @param array $lockedSeats
      * @return array
      */
-    public function buildLayoutResponse(Layout $layout, $eventId = null)
+    public function buildLayoutResponse(Layout $layout, $eventId = null, array $lockedSeats = [])
     {
         // Build Response
         $response = [
@@ -459,6 +460,31 @@ class LayoutRepository
                         }
                     }
 
+                    // Determine status
+                    $currentStatus = 'available';
+                    if ($ess) {
+                        $currentStatus = $statusLabel[$ess->status] ?? 'available';
+                    }
+
+                    // Check if seat is locked (hold) - only if currently available
+                    // Note: lockedSeats keys are raw numeric IDs (e.g., 1468).
+                    // We use array_key_exists because the value might be null, which isset() returns false for.
+                    $holdSessionId = null;
+                    if ($currentStatus === 'available') {
+                        if (array_key_exists($seat->id, $lockedSeats)) {
+                            $currentStatus = 'hold';
+                            $holdSessionId = $lockedSeats[$seat->id];
+                        } elseif (array_key_exists('seat_' . $seat->id, $lockedSeats)) {
+                            $currentStatus = 'hold';
+                            $holdSessionId = $lockedSeats['seat_' . $seat->id];
+                        }
+
+                        // Strip 'user_' prefix if present
+                        if ($holdSessionId && str_starts_with($holdSessionId, 'user_')) {
+                            $holdSessionId = substr($holdSessionId, 5);
+                        }
+                    }
+
                     $rowArr['seats'][] = [
                         'id'             => 'seat_' . $seat->id,
                         'number'         => $seat->seat_no,
@@ -469,7 +495,8 @@ class LayoutRepository
                         // 'ticketCategory' => $seat->ticket_id,
                         // 'status'         => $seat->status,
                         'ticketCategory' => $ess->ticket_id ?? $seat->ticket_id,
-                        'status'         => $ess ? ($statusLabel[$ess->status] ?? 'available') : 'available',
+                        'status'         => $currentStatus,
+                        'hold_by'        => $holdSessionId, // Return session ID of the user holding the lock
                         'radius'         => $seat->seat_reading,
                         'icon'           => $seat->seat_icon,
                         'ticket'         => $ticketPayload,

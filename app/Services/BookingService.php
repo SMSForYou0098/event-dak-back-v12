@@ -32,7 +32,7 @@ class BookingService
      * @param string $txnid The transaction ID
      * @return array
      */
-    public function storePendingBookings($request, $session, $txnid, $gateway = 'unknown')
+    public function storePendingBookings($request, $session, $txnid, $gateway = 'unknown', $orderId = null)
     {
         try {
             $requestData = json_decode($request->requestData);
@@ -84,7 +84,6 @@ class BookingService
                 'master_booking' => $penddingBookingsMaster,
                 'booking_count' => count($bookings)
             ];
-
         } catch (Exception $e) {
             Log::error('BookingService - Store Pending Bookings Error: ' . $e->getMessage(), [
                 'session' => $session,
@@ -159,7 +158,6 @@ class BookingService
             ]);
 
             return $booking;
-
         } catch (Exception $e) {
             Log::error('BookingService - Create Pending Booking Error: ' . $e->getMessage(), [
                 'index' => $index,
@@ -202,7 +200,6 @@ class BookingService
             ]);
 
             return $penddingBookingsMaster;
-
         } catch (Exception $e) {
             Log::error('BookingService - Create Pending Master Booking Error: ' . $e->getMessage(), [
                 'session' => $session,
@@ -250,7 +247,6 @@ class BookingService
                 'master_bookings_count' => $masterBookingsCount,
                 'has_master_booking' => $masterBookingsCount > 0
             ];
-
         } catch (Exception $e) {
             Log::error('BookingService - Get Booking Stats Error: ' . $e->getMessage());
 
@@ -285,7 +281,6 @@ class BookingService
                 'bookings_deleted' => $bookingsDeleted,
                 'master_bookings_deleted' => $masterBookingsDeleted
             ];
-
         } catch (Exception $e) {
             Log::error('BookingService - Cancel Pending Bookings Error: ' . $e->getMessage());
 
@@ -352,7 +347,6 @@ class BookingService
                 'transferred_bookings' => count($masterBookingIDs),
                 'payment_status' => $status
             ];
-
         } catch (Exception $e) {
             Log::error('BookingService - Transfer Event Booking Error: ' . $e->getMessage(), [
                 'session_id' => $sessionId,
@@ -408,7 +402,6 @@ class BookingService
             $this->processPromocode($booking->promocode_id);
 
             return $booking;
-
         } catch (Exception $e) {
             Log::error('BookingService - Create Confirmed Event Booking Error: ' . $e->getMessage());
             return null;
@@ -447,7 +440,6 @@ class BookingService
                 }
             }
             return true;
-
         } catch (Exception $e) {
             Log::error('BookingService - Create Confirmed Master Booking Error: ' . $e->getMessage());
             return false;
@@ -549,7 +541,6 @@ class BookingService
 
             $promocode->save();
             return true;
-
         } catch (Exception $e) {
             Log::error('BookingService - Process Promocode Error: ' . $e->getMessage());
             return false;

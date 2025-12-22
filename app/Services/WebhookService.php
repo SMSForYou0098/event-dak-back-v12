@@ -2096,7 +2096,7 @@ class WebhookService
 
         return $booking;
     }
-    public function store(Request $request, $session, $txnid, $setId)
+    public function store(Request $request, $session, $txnid, $setId, $gateway = 'unknown')
     {
         try {
             $qty = (int) $request->quantity;
@@ -2228,7 +2228,7 @@ class WebhookService
         }
     }
 
-    public function storeEmusment($request, $session, $txnid)
+    public function storeEmusment($request, $session, $txnid, $setId = null)
     {
         try {
             $requestData = json_decode($request->requestData);

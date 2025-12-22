@@ -2,8 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Exports\ComplimentaryBookingsExport;
-use App\Jobs\ProcessComplimentaryBookings;
 use App\Jobs\SendComplimentaryBookingNotification;
 use App\Models\ComplimentaryBookings;
 use App\Models\Ticket;
@@ -13,11 +11,7 @@ use Auth;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
-use Maatwebsite\Excel\Facades\Excel;
 use Spatie\Permission\Models\Role;
-use Illuminate\Support\Facades\Queue;
-use Illuminate\Support\Facades\Log;
-
 
 class ComplimentaryBookingController extends Controller
 {
@@ -43,51 +37,6 @@ class ComplimentaryBookingController extends Controller
                     ->where('reporting_user', $user->id)
                     ->orWhere('reporting_user', $user->reporting_user);
             }
-
-            // if ($dates) {
-            //     if (count($dates) === 1) {
-            //         $singleDate = Carbon::parse($dates[0])->toDateString();
-            //         $query->whereDate('created_at', $singleDate);
-            //     } elseif (count($dates) === 2) {
-            //         $startDate = Carbon::parse($dates[0])->startOfDay();
-            //         $endDate = Carbon::parse($dates[1])->endOfDay();
-            //         $query->whereBetween('created_at', [$startDate, $endDate]);
-            //     }
-            // } else {
-            //     $query->whereDate('created_at', Carbon::today());
-            // }
-
-            // $batchBookings = $query->get();
-
-            // $result = $batchBookings->map(function ($batchBooking) {
-            //     $bookings = ComplimentaryBookings::withTrashed()->where('batch_id', $batchBooking->batch_id)->get();
-            //     $bookingCount = $bookings->count();
-            //     $ticketName = $bookings->first()->ticket->name ?? null;
-            //     $eventName = $bookings->first()->ticket->event->name ?? null;
-            //     $bookingDate = $bookings->first()->created_at;
-            //     $bookingType = $bookings->first()->type;
-            //     $data = $bookingType == 'imported' ? 1 : 0;
-            //     $user = $batchBooking->reportingUser;
-            //     $disable = !is_null($batchBooking->deleted_at);
-
-            //     return [
-            //         'name' => $user?->name,
-            //         'number' => $user?->number,
-            //         'booking_count' => $bookingCount,
-            //         'ticket_name' => $ticketName,
-            //         'event_name' => $eventName,
-            //         'booking_date' => $bookingDate,
-            //         'batch_id' => $batchBooking->batch_id,
-            //         'type' => $data,
-            //         'is_deleted' => $disable,
-            //     ];
-            // });
-
-            // $result = $result->sortByDesc('booking_date')->values();
-            // return response()->json([
-            //     'status' => true,
-            //     'data' => $result,
-            // ]);
 
             $batchBookings = $query->get();
 
@@ -434,7 +383,7 @@ class ComplimentaryBookingController extends Controller
             'ticket'
         ])->get();
         return response()->json(['ComplimentaryBookings' => $ComplimentaryBookings]);
-        return Excel::download(new ComplimentaryBookingsExport($ComplimentaryBookings), 'ComplimentaryBookings_export.xlsx');
+        // return Excel::download(new ComplimentaryBookingsExport($ComplimentaryBookings), 'ComplimentaryBookings_export.xlsx');
     }
 
     public function restoreComplimentaryBooking($id)
@@ -541,14 +490,14 @@ class ComplimentaryBookingController extends Controller
             $ticket = $firstBooking->ticket;
             $event = $ticket->event;
 
-            $whatsappTemplate = \App\Models\WhatsappApi::where('title', 'Agent Booking')->first();
+            $whatsappTemplate = WhatsappApi::where('title', 'Agent Booking')->first();
             $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
 
             $orderId = $firstBooking->master_token ?? $firstBooking->token;
             $shortLinksms = "t.getyourticket.in/t/{$orderId}";
 
             $dates = explode(',', $event->date_range);
-            $formattedDates = array_map(fn($d) => \Carbon\Carbon::parse($d)->format('d-m-Y'), $dates);
+            $formattedDates = array_map(fn($d) => Carbon::parse($d)->format('d-m-Y'), $dates);
             $eventDateTime = implode(' | ', $formattedDates) . ' | ' . $event->start_time . ' - ' . $event->end_time;
 
             $ticketSummary = collect($bookings)

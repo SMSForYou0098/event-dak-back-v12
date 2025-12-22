@@ -22,8 +22,6 @@ use App\Http\Controllers\UserController;
 use App\Http\Controllers\UserInfoController;
 use Illuminate\Support\Facades\Route;
 
-
-Route::get('layout/theatre/{id}', [LayoutController::class, 'viewLayout']);
 Route::post('resend-verification', [EmailVerificationController::class, 'resend'])->name('verification.resend');
 Route::get('agreement/preview/{id}', [AgreementController::class, 'previewAgreement']);
 Route::post('agreement/verify-user', [AgreementController::class, 'verifyUserForAgreement']);
@@ -84,3 +82,5 @@ Route::get('/global-search', [GlobalSearchController::class, 'search']);
 
 Route::get('onboarding/org', [AgreementController::class, 'onboardingList']);
 Route::post('onboarding/org/action', [AgreementController::class, 'organizerAction']);
+
+Route::get('layout/theatre/{id}', [LayoutController::class, 'viewLayout']);

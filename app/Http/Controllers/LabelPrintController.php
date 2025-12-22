@@ -128,6 +128,57 @@ class LabelPrintController extends Controller
     }
 
     /**
+     * Add a single entry to an existing batch.
+     */
+    public function addToBatch(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'batch_id' => 'required|string',
+            'user_id' => 'required|exists:users,id',
+            'name' => 'required|string|max:255',
+            'surname' => 'required|string|max:255',
+            'number' => 'nullable|string|max:50',
+            'designation' => 'nullable|string|max:255',
+            'company_name' => 'nullable|string|max:255',
+            'stall_number' => 'nullable|string|max:50',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+            $labelPrint = LabelPrint::create([
+                'user_id' => $request->user_id,
+                'batch_id' => $request->batch_id,
+                'name' => $request->name,
+                'surname' => $request->surname,
+                'number' => $request->number,
+                'designation' => $request->designation,
+                'company_name' => $request->company_name,
+                'stall_number' => $request->stall_number,
+                'status' => false, // Default pending
+            ]);
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Label added to batch successfully',
+                'data' => $labelPrint,
+            ], 201);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to add label to batch',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
      * Display the specified label print.
      */
     public function show(int $id): JsonResponse

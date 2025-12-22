@@ -33,7 +33,7 @@ class RestrictIP
         't.getyourticket.in',
         't1.getyourticket.in',
         'tbz.getyourticket.in',
-        '192.168.0.136',
+        '192.168.0.155',
         '192.168.0.126',
         '10.87.158.93',
         '10.87.158.1'

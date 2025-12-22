@@ -9,26 +9,31 @@ use App\Repositories\LayoutRepository;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
+use App\Services\SeatLockingService;
+use App\Models\EventHasLayout;
+
 class LayoutController extends Controller
 {
     protected $layoutRepository;
+    protected $seatLockingService;
 
-    public function __construct(LayoutRepository $layoutRepository)
+    public function __construct(LayoutRepository $layoutRepository, SeatLockingService $seatLockingService)
     {
         $this->layoutRepository = $layoutRepository;
+        $this->seatLockingService = $seatLockingService;
     }
 
     public function index()
     {
         $layouts = $this->layoutRepository->getAllLayouts();
-        
+
         if ($layouts->isEmpty()) {
             return response()->json([
                 'status' => false,
                 'message' => 'Layout not found'
             ], 200);
         }
-        
+
         return response()->json([
             'status' => true,
             'data' => LayoutResource::collection($layouts),
@@ -122,7 +127,6 @@ class LayoutController extends Controller
         }
     }
 
-
     public function viewLayout($layoutId)
     {
         try {
@@ -137,7 +141,18 @@ class LayoutController extends Controller
                 ], 404);
             }
 
-            $response = $this->layoutRepository->buildLayoutResponse($layout, $eventId);
+            // If eventId is not provided, try to find it associated with this layout
+            if (empty($eventId)) {
+                $ehl = EventHasLayout::where('layout_id', $layoutId)->latest('id')->first();
+                $eventId = $ehl->event_id ?? null;
+            }
+
+            $lockedSeats = [];
+            if ($eventId) {
+                $lockedSeats = $this->seatLockingService->getLockedSeatsForEvent($eventId);
+            }
+
+            $response = $this->layoutRepository->buildLayoutResponse($layout, $eventId, $lockedSeats);
 
             return response()->json([
                 "success" => true,
@@ -159,7 +174,7 @@ class LayoutController extends Controller
             $layoutId = $request->layoutId;
             $eventKey = $request->eventId;
             $ticketAssignments = $request->ticketAssignments;
-            
+
             // Find event by event_key or ID
             $event = Event::query();
 

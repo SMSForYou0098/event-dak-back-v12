@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\SeatStatusUpdated;
 use App\Exports\AgentBookingExport;
 use App\Models\Booking;
 use App\Models\MasterBooking;
@@ -54,6 +55,7 @@ class AgentController extends Controller
     {
         try {
             $user = auth()->user();
+            $userId = auth()->id() ?? $request->user_id;
 
             // 🔹 Step 1: Balance Check for Agent
             $latestBalance = null;
@@ -76,9 +78,10 @@ class AgentController extends Controller
                     ], 400);
                 }
             }
-            // 🔹 Step 2: Initialize Data - SESSION ID ONCE FOR ALL TICKETS
-            $sessionId = $request->session_id ?? $this->sessionIdService->generateEncryptedSessionId()['original'];
 
+
+            // 1. Session ID for Seat Locking (Redis check)
+            $lockSessionId = $request->session_id ?? $request->sessionId ?? ($userId ? "user_{$userId}" : null);
             //  SEAT VALIDATION PHASE - CHECK BEFORE ANY BOOKING
             $seating_module = $request->seating_module;
             // return $seating_module;
@@ -87,7 +90,7 @@ class AgentController extends Controller
                 $validation = $this->eventSeatStatusService->validateSeatsBeforeBooking(
                     $request->tickets,
                     $this->seatLockingService,
-                    $sessionId
+                    $lockSessionId
                 );
                 // return $validation;
                 if (!$validation['valid']) {
@@ -98,6 +101,14 @@ class AgentController extends Controller
                         'message' => $validation['message']
                     ], 409);
                 }
+            }
+
+            // 2. Session ID for Database Storage (Booking record)
+            $dbSessionId = $this->sessionIdService->generateEncryptedSessionId()['original'];
+
+            // Fallback: If no lock session ID (e.g. non-seated booking without user), use the DB one
+            if (!$lockSessionId) {
+                $lockSessionId = $dbSessionId;
             }
 
             DB::beginTransaction();
@@ -151,7 +162,7 @@ class AgentController extends Controller
                     $booking->set_id = $setId;
                     $booking->booking_by = $request->agent_id;
                     $booking->user_id = $request->user_id;
-                    $booking->session_id = $sessionId;
+                    $booking->session_id = $dbSessionId;
                     $booking->token = $token;
                     $booking->email = $request->email;
                     $booking->name = $request->name;
@@ -178,7 +189,6 @@ class AgentController extends Controller
                     $booking->save();
 
                     // 🔥 Booking Tax
-                    // 🔥 Booking Tax
                     $this->bookingTaxService->createBookingTax(
                         $booking->id,
                         'agent',
@@ -195,7 +205,7 @@ class AgentController extends Controller
                             $ticket->event_id,
                             $ticket->event->event_key ?? null,
                             $type,
-                            $sessionId
+                            $dbSessionId
                         );
 
                         if ($ess) {
@@ -208,7 +218,22 @@ class AgentController extends Controller
                     $ticketBookingIds[] = $booking->id;
                 }
 
-                // 🔹 Master Booking Per Ticket
+                // � Broadcast Seat Updates for this Ticket
+                if ($hasSeats) {
+                    $bookedSeatIds = array_column($itemsToBook, 'seat_id');
+                    $bookedSeatIds = array_filter($bookedSeatIds); // Remove nulls
+
+                    if (!empty($bookedSeatIds) && env('ENABLE_SEAT_STATUS_UPDATES', true)) {
+                        event(new SeatStatusUpdated(
+                            $ticket->event_id,
+                            $bookedSeatIds,
+                            'booked',
+                            $request->user_id // Pass the lock session ID (user_id based)
+                        ));
+                    }
+                }
+
+                // �🔹 Master Booking Per Ticket
                 if ($quantity > 1) {
                     $masterToken = $this->WebhookService->generateHexadecimalCode();
 
@@ -216,7 +241,7 @@ class AgentController extends Controller
                     $masterBooking->booking_id = $ticketBookingIds;
                     $masterBooking->user_id = $request->user_id;
                     $masterBooking->booking_by = $request->agent_id;
-                    $masterBooking->session_id = $sessionId;
+                    $masterBooking->session_id = $dbSessionId;
                     $masterBooking->set_id = $setId;
                     $masterBooking->order_id = $masterToken;
                     $masterBooking->total_amount = $ticketData['totalFinalAmount'];
@@ -264,7 +289,7 @@ class AgentController extends Controller
                 'LSection' => function ($query) {
                     $query->select('id', 'name'); // Attendee details
                 }
-            ])->where('session_id', $sessionId)
+            ])->where('session_id', $dbSessionId)
                 ->select('id', 'email', 'name', 'number', 'total_amount', 'discount', 'ticket_id', 'attendee_id', 'seat_name', 'section_id')
                 ->get();
 
@@ -309,7 +334,7 @@ class AgentController extends Controller
                 'status' => true,
                 'message' => 'Tickets booked successfully',
                 'bookings' => $responseData,
-                'session_id' => $sessionId,
+                'session_id' => $dbSessionId,
                 'set_id' => $setId,
             ], 200);
         } catch (\Exception $e) {
@@ -440,9 +465,7 @@ class AgentController extends Controller
                 ->first();
 
             if ($masterBooking) {
-                $bookingIds = is_array($masterBooking->booking_id)
-                    ? $masterBooking->booking_id
-                    : json_decode($masterBooking->booking_id, true);
+                $bookingIds = $masterBooking->booking_id;
 
                 if (!empty($bookingIds) && is_array($bookingIds)) {
                     // 🔍 Get related ticket IDs
@@ -520,9 +543,7 @@ class AgentController extends Controller
                 ->first();
 
             if ($masterBooking) {
-                $bookingIds = is_array($masterBooking->booking_id)
-                    ? $masterBooking->booking_id
-                    : json_decode($masterBooking->booking_id, true);
+                $bookingIds = $masterBooking->booking_id;
 
                 if (!empty($bookingIds) && is_array($bookingIds)) {
                     // 🔍 Get related ticket_ids from those bookings
@@ -633,7 +654,7 @@ class AgentController extends Controller
             ->first();
 
         if ($master) {
-            $ids = is_string($master->booking_id) ? json_decode($master->booking_id, true) : $master->booking_id;
+            $ids = $master->booking_id;
             $bookings = Booking::withTrashed()
                 ->whereIn('id', $ids)
                 ->where('booking_type', 'agent')
@@ -642,7 +663,7 @@ class AgentController extends Controller
         }
         // ===================== Booking Master =====================
         elseif ($master = MasterBooking::withTrashed()->where('order_id', $order_id)->first()) {
-            $ids = is_string($master->booking_id) ? json_decode($master->booking_id, true) : $master->booking_id;
+            $ids = $master->booking_id;
             $bookings = Booking::withTrashed()->whereIn('id', $ids)->with('attendee', 'ticket.event')->get();
         }
         // ===================== Sponsor Master (unified) =====================
@@ -651,7 +672,7 @@ class AgentController extends Controller
             ->where('booking_type', 'sponsor')
             ->first()
         ) {
-            $ids = is_string($master->booking_id) ? json_decode($master->booking_id, true) : $master->booking_id;
+            $ids = $master->booking_id;
             $bookings = Booking::withTrashed()
                 ->whereIn('id', $ids)
                 ->where('booking_type', 'sponsor')

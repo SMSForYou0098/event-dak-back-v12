@@ -2,111 +2,309 @@
 
 namespace App\Http\Controllers;
 
-use Illuminate\Http\Request;
+use App\Events\SeatStatusUpdated;
 use App\Services\SeatLockingService;
 use App\Services\EventSeatStatusService;
-use Illuminate\Support\Facades\Validator;
-use App\Services\SessionIdService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 
 class SeatLockController extends Controller
 {
-    protected $seatLockingService;
-    protected $eventSeatStatusService;
-    protected $sessionIdService;
+    private const int MAX_SEATS_PER_USER = 10;
+    private const int DEFAULT_LOCK_DURATION = 600;
 
     public function __construct(
-        SeatLockingService $seatLockingService,
-        EventSeatStatusService $eventSeatStatusService,
-        SessionIdService $sessionIdService
-    ) {
-        $this->seatLockingService = $seatLockingService;
-        $this->eventSeatStatusService = $eventSeatStatusService;
-        $this->sessionIdService = $sessionIdService;
-    }
+        private readonly SeatLockingService $seatLockingService,
+        private readonly EventSeatStatusService $eventSeatStatusService
+    ) {}
 
     /**
-     * Lock seats for a temporary period
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
+     * Lock seats with diff logic
      */
-    public function lock(Request $request)
+    public function lock(Request $request): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
-            'event_id' => 'required|integer',
-            'seats' => 'required|array|min:1',
-            'seats.*' => 'required', // Can be int or string (seat_123)
-            'session_id' => 'nullable|string', // Optional now
-            'duration' => 'nullable|integer|min:60|max:1800' // Optional duration (1-30 mins)
-        ]);
+        $validated = $this->validateLockRequest($request);
 
-        if ($validator->fails()) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Validation failed',
-                'errors' => $validator->errors()
-            ], 422);
+        $user = $request->user();
+        if (!$user) {
+            return $this->errorResponse('Unauthorized', 401);
         }
 
-        $eventId = $request->event_id;
-        $seatIds = $request->seats;
-        // Generate session ID if not provided
-        $sessionId = $request->session_id ?? $this->sessionIdService->generateEncryptedSessionId()['original'];
-        $duration = $request->duration ?? 600; // Default 10 minutes
+        $userId = $user->id;
+        $sessionId = "user_{$userId}";
+        $eventId = $validated['event_id'];
+        $duration = $validated['duration'] ?? self::DEFAULT_LOCK_DURATION;
 
-        // 1. Check availability first (Database Status + Redis Lock by OTHERS)
-        $unavailableSeats = [];
-        $numericSeatIds = [];
+        $newSeats = $this->normalizeSeats($validated['seats']);
 
-        foreach ($seatIds as $seatId) {
-            // Extract numeric ID for consistent processing
-            // We use a helper or simple regex here if the service method isn't public static
-            // But since we have the service, let's use its logic via isSeatAvailable
+        if ($newSeats->isEmpty()) {
+            return $this->errorResponse('No valid seat IDs provided', 422);
+        }
 
-            // Note: isSeatAvailable expects a single seat ID. 
-            // We pass $sessionId to allow re-locking if we already hold the lock (extend duration)
-            if (!$this->eventSeatStatusService->isSeatAvailable($seatId, $eventId, $this->seatLockingService, $sessionId)) {
-                $unavailableSeats[] = $seatId;
-            } else {
-                // Extract numeric ID for locking service
-                if (preg_match('/(\d+)/', $seatId, $matches)) {
-                    $numericSeatIds[] = (int) $matches[1];
-                } elseif (is_numeric($seatId)) {
-                    $numericSeatIds[] = (int) $seatId;
-                }
+        // Get user's current locks
+        $currentLocks = collect($this->seatLockingService->getUserLocks($eventId, $sessionId));
+
+        // Calculate diff
+        [$toRelease, $toAcquire, $toKeep] = $this->calculateSeatDiff($currentLocks, $newSeats);
+
+        // Step 1: Batch check availability
+        if ($toAcquire->isNotEmpty()) {
+            $availability = $this->eventSeatStatusService->areSeatsAvailable(
+                $toAcquire->all(),
+                $eventId,
+                $this->seatLockingService,
+                $sessionId
+            );
+
+            if (!$availability['all_available']) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Some seats are not available',
+                    'unavailable_seats' => $availability['unavailable'],
+                    'booked_seats' => $availability['booked'],
+                    'locked_by_others' => $availability['locked_by_others'],
+                    'your_current_seats' => $currentLocks->values()->all()
+                ], 409);
             }
         }
 
-        if (!empty($unavailableSeats)) {
+        // Step 2: Release seats user no longer wants
+        $this->releaseSeats($eventId, $toRelease, $sessionId, $userId);
+
+        // Step 3: Extend TTL on seats user is keeping
+        $this->extendSeats($eventId, $toKeep, $sessionId, $duration);
+
+        // Step 4: Acquire new seats
+        $failedSeats = $this->acquireSeats($eventId, $toAcquire, $sessionId, $duration, $userId);
+
+        // Build final response
+        $finalLockedSeats = $toKeep->merge($toAcquire->diff(collect($failedSeats)))->values();
+
+        if (!empty($failedSeats)) {
             return response()->json([
                 'status' => false,
-                'message' => 'Some seats are no longer available',
-                'unavailable_seats' => $unavailableSeats
+                'message' => 'Some seats were taken just now',
+                'failed_seats' => $failedSeats,
+                'locked_seats' => $finalLockedSeats->all(),
+                'released_seats' => $toRelease->all(),
+                'expires_in' => $duration
             ], 409);
         }
 
-        // 2. Attempt to lock all seats
+        return response()->json([
+            'status' => true,
+            'message' => 'Seats locked successfully',
+            'locked_seats' => $finalLockedSeats->all(),
+            'released_seats' => $toRelease->all(),
+            'expires_in' => $duration
+        ]);
+    }
+
+    /**
+     * Release all seats for user
+     */
+    public function releaseAll(Request $request): JsonResponse
+    {
+        $validated = validator($request->all(), [
+            'event_id' => 'required|integer|exists:events,id'
+        ])->validate();
+
+        $user = $request->user();
+        if (!$user) {
+            return $this->errorResponse('Unauthorized', 401);
+        }
+
+        $userId = $user->id;
+        $sessionId = "user_{$userId}";
+        $eventId = $validated['event_id'];
+
+        $currentLocks = $this->seatLockingService->getUserLocks($eventId, $sessionId);
+
+        if (!empty($currentLocks)) {
+            $this->seatLockingService->releaseBatchLocks($eventId, $currentLocks, $sessionId);
+
+            event(new SeatStatusUpdated($eventId, $currentLocks, 'available', $userId));
+        }
+
+        return response()->json([
+            'status' => true,
+            'message' => 'All seats released',
+            'released_seats' => $currentLocks
+        ]);
+    }
+
+    /**
+     * Get user's current locked seats
+     */
+    public function myLocks(Request $request): JsonResponse
+    {
+        $validated = validator($request->all(), [
+            'event_id' => 'required|integer|exists:events,id'
+        ])->validate();
+
+        $user = $request->user();
+        if (!$user) {
+            return $this->errorResponse('Unauthorized', 401);
+        }
+
+        $sessionId = "user_{$user->id}";
+        $eventId = $validated['event_id'];
+
+        $locks = $this->seatLockingService->getUserLocks($eventId, $sessionId);
+        $ttl = $this->seatLockingService->getUserLocksTTL($eventId, $sessionId);
+
+        return response()->json([
+            'status' => true,
+            'locked_seats' => $locks,
+            'expires_in' => $ttl
+        ]);
+    }
+
+    /**
+     * Extend lock duration
+     */
+    public function extendLocks(Request $request): JsonResponse
+    {
+        $validated = validator($request->all(), [
+            'event_id' => 'required|integer|exists:events,id',
+            'duration' => 'nullable|integer|min:60|max:1800'
+        ])->validate();
+
+        $user = $request->user();
+        if (!$user) {
+            return $this->errorResponse('Unauthorized', 401);
+        }
+
+        $sessionId = "user_{$user->id}";
+        $eventId = $validated['event_id'];
+        $duration = $validated['duration'] ?? self::DEFAULT_LOCK_DURATION;
+
+        $currentLocks = $this->seatLockingService->getUserLocks($eventId, $sessionId);
+
+        if (empty($currentLocks)) {
+            return $this->errorResponse('No active locks to extend', 404);
+        }
+
+        $this->seatLockingService->extendBatchLocks($eventId, $currentLocks, $sessionId, $duration);
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Locks extended',
+            'locked_seats' => $currentLocks,
+            'expires_in' => $duration
+        ]);
+    }
+
+    /**
+     * Validate lock request
+     */
+    private function validateLockRequest(Request $request): array
+    {
+        return validator($request->all(), [
+            'event_id' => 'required|integer|exists:events,id',
+            'seats' => 'required|array|min:1|max:' . self::MAX_SEATS_PER_USER,
+            'seats.*' => 'required',
+            'duration' => 'nullable|integer|min:60|max:1800'
+        ])->validate();
+    }
+
+    /**
+     * Calculate seat diff
+     * 
+     * @return array{Collection, Collection, Collection}
+     */
+    private function calculateSeatDiff(Collection $currentLocks, Collection $newSeats): array
+    {
+        return [
+            $currentLocks->diff($newSeats)->values(),  // toRelease
+            $newSeats->diff($currentLocks)->values(),  // toAcquire
+            $newSeats->intersect($currentLocks)->values()  // toKeep
+        ];
+    }
+
+    /**
+     * Release seats
+     */
+    private function releaseSeats(int $eventId, Collection $seats, string $sessionId, int $userId): void
+    {
+        if ($seats->isEmpty()) {
+            return;
+        }
+
+        $this->seatLockingService->releaseBatchLocks($eventId, $seats->all(), $sessionId);
+
+        event(new SeatStatusUpdated($eventId, $seats->all(), 'available', $userId));
+    }
+
+    /**
+     * Extend seat locks
+     */
+    private function extendSeats(int $eventId, Collection $seats, string $sessionId, int $duration): void
+    {
+        if ($seats->isEmpty()) {
+            return;
+        }
+
+        $this->seatLockingService->extendBatchLocks($eventId, $seats->all(), $sessionId, $duration);
+    }
+
+    /**
+     * Acquire new seats
+     */
+    private function acquireSeats(
+        int $eventId,
+        Collection $seats,
+        string $sessionId,
+        int $duration,
+        int $userId
+    ): array {
+        if ($seats->isEmpty()) {
+            return [];
+        }
+
         $result = $this->seatLockingService->acquireBatchSeatLocks(
             $eventId,
-            $numericSeatIds,
+            $seats->all(),
             $sessionId,
             $duration
         );
 
-        if ($result['success']) {
-            return response()->json([
-                'status' => true,
-                'message' => 'Seats locked successfully',
-                'session_id' => $sessionId, // Return the generated/used session ID
-                'locked_seats' => $seatIds,
-                'expires_in' => $duration
-            ]);
-        } else {
-            return response()->json([
-                'status' => false,
-                'message' => 'Failed to lock seats. They may have been taken just now.',
-                'failed_seats' => $result['failed_seats']
-            ], 409);
+        $failedSeats = $result['success'] ? [] : $result['failed_seats'];
+
+        $lockedNew = $seats->diff(collect($failedSeats));
+        if ($lockedNew->isNotEmpty()) {
+            event(new SeatStatusUpdated($eventId, $lockedNew->all(), 'locked', $userId));
         }
+
+        return $failedSeats;
+    }
+
+    /**
+     * Normalize seat IDs to integers
+     */
+    private function normalizeSeats(array $seats): Collection
+    {
+        return collect($seats)
+            ->filter(fn(mixed $seat): bool => filled($seat))
+            ->map(fn(mixed $seat): ?int => match (true) {
+                is_numeric($seat) => (int) $seat,
+                is_string($seat) && preg_match('/(\d+)/', $seat, $m) => (int) $m[1],
+                default => null
+            })
+            ->filter()
+            ->unique()
+            ->values();
+    }
+
+    /**
+     * Error response helper
+     */
+    private function errorResponse(string $message, int $status = 400): JsonResponse
+    {
+        return response()->json([
+            'status' => false,
+            'message' => $message
+        ], $status);
     }
 }

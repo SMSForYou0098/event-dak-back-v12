@@ -4,52 +4,14 @@ namespace App\Services;
 
 use Illuminate\Support\Facades\Redis;
 
-/**
- * Seat Locking Service
- * 
- * Implements Redis-based seat locking to prevent race conditions and double-bookings
- * during high-traffic scenarios. Uses Redis as a distributed lock mechanism with
- * configurable TTL (Time To Live).
- * 
- * Lock Key Format: seat_lock:{eventId}:{seatId}
- * Lock Value: Booking session identifier (prevents accidental unlock by other requests)
- * 
- * Usage:
- *   1. acquireSeatLock() - Attempt to lock a seat
- *   2. isSeatLocked() - Check if seat is currently locked
- *   3. releaseSeatLock() - Release the lock after successful booking
- *   4. releaseBatchLocks() - Release multiple locks at once
- */
-class SeatLockingService
+readonly class SeatLockingService
 {
-    /**
-     * Lock duration in seconds
-     * After this time, the lock automatically expires (prevents deadlocks)
-     */
-    const LOCK_DURATION = 300; // 5 minutes
-
-    /**
-     * Maximum lock acquisition retries
-     */
-    const MAX_LOCK_RETRIES = 3;
-
-    /**
-     * Retry delay in milliseconds
-     */
-    const RETRY_DELAY_MS = 100;
+    private const int LOCK_DURATION = 600;
+    private const int MAX_SEATS_PER_USER = 10;
+    private const int USER_LOCK_TTL_BUFFER = 60;
 
     /**
      * Acquire a lock for a seat
-     * 
-     * Uses Redis SET with NX (only if not exists) and EX (expiry) for atomic operation.
-     * This prevents multiple concurrent bookings of the same seat.
-     * 
-     * @param int $eventId - Event ID
-     * @param int $seatId - Seat ID
-     * @param string $sessionId - Unique session/request identifier
-     * @param int $duration - Lock duration in seconds (default: 300)
-     * @return bool - True if lock acquired, false if seat already locked
-     * @throws \Exception
      */
     public function acquireSeatLock(
         int $eventId,
@@ -57,40 +19,31 @@ class SeatLockingService
         string $sessionId,
         int $duration = self::LOCK_DURATION
     ): bool {
-        try {
-            $lockKey = $this->getLockKey($eventId, $seatId);
+        $lockKey = $this->getSeatLockKey($eventId, $seatId);
+        $userLocksKey = $this->getUserLocksKey($eventId, $sessionId);
 
-            // 🔥 ATOMIC: SET only if key doesn't exist (NX) with expiry (EX)
-            // This is the core of Redis distributed locking
-            $locked = Redis::set(
-                $lockKey,
-                $sessionId,
-                'EX',    // Expiry in seconds
-                $duration,
-                'NX'     // Only if not exists
-            );
-
-            if ($locked) {
-                return true;
-            }
-
-            return false;
-        } catch (\Exception $e) {
-            throw new \Exception('Failed to acquire seat lock: ' . $e->getMessage());
+        // Check if already our lock
+        $currentHolder = Redis::get($lockKey);
+        if ($currentHolder === $sessionId) {
+            Redis::expire($lockKey, $duration);
+            Redis::expire($userLocksKey, $duration + self::USER_LOCK_TTL_BUFFER);
+            return true;
         }
+
+        // Try to acquire if not exists
+        $locked = Redis::set($lockKey, $sessionId, 'EX', $duration, 'NX');
+
+        if ($locked) {
+            Redis::sadd($userLocksKey, $seatId);
+            Redis::expire($userLocksKey, $duration + self::USER_LOCK_TTL_BUFFER);
+            return true;
+        }
+
+        return false;
     }
 
     /**
      * Acquire locks for multiple seats
-     * 
-     * Efficiently locks multiple seats for a single booking.
-     * If any seat lock fails, previously acquired locks are released.
-     * 
-     * @param int $eventId - Event ID
-     * @param array $seatIds - Array of seat IDs to lock
-     * @param string $sessionId - Unique session/request identifier
-     * @param int $duration - Lock duration in seconds
-     * @return array - ['success' => bool, 'locked_seats' => array, 'failed_seats' => array]
      */
     public function acquireBatchSeatLocks(
         int $eventId,
@@ -98,27 +51,28 @@ class SeatLockingService
         string $sessionId,
         int $duration = self::LOCK_DURATION
     ): array {
+        // Check max seats limit
+        $currentLocks = $this->getUserLocks($eventId, $sessionId);
+        $newSeats = array_diff($seatIds, $currentLocks);
+        $totalAfterLock = count($currentLocks) + count($newSeats);
+
+        if ($totalAfterLock > self::MAX_SEATS_PER_USER) {
+            return [
+                'success' => false,
+                'locked_seats' => [],
+                'failed_seats' => $seatIds,
+                'error' => 'Maximum ' . self::MAX_SEATS_PER_USER . ' seats allowed'
+            ];
+        }
+
         $lockedSeats = [];
         $failedSeats = [];
 
         foreach ($seatIds as $seatId) {
-            try {
-                if ($this->acquireSeatLock($eventId, $seatId, $sessionId, $duration)) {
-                    $lockedSeats[] = $seatId;
-                } else {
-                    $failedSeats[] = $seatId;
-                    // If any seat lock fails, release all previously locked seats
-                    $this->releaseBatchLocks($eventId, $lockedSeats, $sessionId);
-
-                    return [
-                        'success' => false,
-                        'locked_seats' => [],
-                        'failed_seats' => $failedSeats
-                    ];
-                }
-            } catch (\Exception $e) {
+            if ($this->acquireSeatLock($eventId, $seatId, $sessionId, $duration)) {
+                $lockedSeats[] = $seatId;
+            } else {
                 $failedSeats[] = $seatId;
-                // Release already locked seats
                 $this->releaseBatchLocks($eventId, $lockedSeats, $sessionId);
 
                 return [
@@ -137,198 +91,196 @@ class SeatLockingService
     }
 
     /**
+     * Get all seats locked by a user for an event
+     */
+    public function getUserLocks(int $eventId, string $sessionId): array
+    {
+        $userLocksKey = $this->getUserLocksKey($eventId, $sessionId);
+        $seats = Redis::smembers($userLocksKey);
+
+        if (empty($seats)) {
+            return [];
+        }
+
+        $validSeats = [];
+        $staleSeats = [];
+
+        foreach ($seats as $seatId) {
+            if ($this->getLockHolder($eventId, (int) $seatId) === $sessionId) {
+                $validSeats[] = (int) $seatId;
+            } else {
+                $staleSeats[] = $seatId;
+            }
+        }
+
+        // Cleanup stale entries
+        if (!empty($staleSeats)) {
+            Redis::srem($userLocksKey, ...$staleSeats);
+        }
+
+        return $validSeats;
+    }
+
+    /**
+     * Get TTL of user's locks (minimum TTL)
+     */
+    public function getUserLocksTTL(int $eventId, string $sessionId): ?int
+    {
+        $seats = $this->getUserLocks($eventId, $sessionId);
+
+        if (empty($seats)) {
+            return null;
+        }
+
+        $minTTL = null;
+
+        foreach ($seats as $seatId) {
+            $ttl = Redis::ttl($this->getSeatLockKey($eventId, $seatId));
+
+            if ($ttl > 0 && ($minTTL === null || $ttl < $minTTL)) {
+                $minTTL = $ttl;
+            }
+        }
+
+        return $minTTL;
+    }
+
+    /**
+     * Extend TTL for multiple seats
+     */
+    public function extendBatchLocks(
+        int $eventId,
+        array $seatIds,
+        string $sessionId,
+        int $duration = self::LOCK_DURATION
+    ): bool {
+        $userLocksKey = $this->getUserLocksKey($eventId, $sessionId);
+
+        foreach ($seatIds as $seatId) {
+            $lockKey = $this->getSeatLockKey($eventId, $seatId);
+
+            if (Redis::get($lockKey) === $sessionId) {
+                Redis::expire($lockKey, $duration);
+            }
+        }
+
+        Redis::expire($userLocksKey, $duration + self::USER_LOCK_TTL_BUFFER);
+
+        return true;
+    }
+
+    /**
      * Check if a seat is currently locked
-     * 
-     * @param int $eventId - Event ID
-     * @param int $seatId - Seat ID
-     * @return bool
      */
     public function isSeatLocked(int $eventId, int $seatId): bool
     {
-        try {
-            $lockKey = $this->getLockKey($eventId, $seatId);
-            return Redis::exists($lockKey) > 0;
-        } catch (\Exception $e) {
-            return false;
-        }
+        return Redis::exists($this->getSeatLockKey($eventId, $seatId)) > 0;
     }
 
     /**
-     * Get the session ID holding the lock (if any)
-     * 
-     * Useful for debugging and monitoring which request/session has the lock.
-     * 
-     * @param int $eventId - Event ID
-     * @param int $seatId - Seat ID
-     * @return string|null - Session ID or null if not locked
+     * Get the session ID holding the lock
      */
     public function getLockHolder(int $eventId, int $seatId): ?string
     {
-        try {
-            $lockKey = $this->getLockKey($eventId, $seatId);
-            return Redis::get($lockKey);
-        } catch (\Exception $e) {
-            return null;
-        }
+        return Redis::get($this->getSeatLockKey($eventId, $seatId));
     }
 
     /**
-     * Release a seat lock
-     * 
-     * Only allows release if the sessionId matches (prevents accidental/malicious unlock).
-     * Uses Lua script to ensure atomic check-and-delete operation.
-     * 
-     * @param int $eventId - Event ID
-     * @param int $seatId - Seat ID
-     * @param string $sessionId - Session ID that acquired the lock
-     * @return bool - True if lock was released
+     * Release a seat lock (atomic with Lua)
      */
-    public function releaseSeatLock(
-        int $eventId,
-        int $seatId,
-        string $sessionId
-    ): bool {
-        try {
-            $lockKey = $this->getLockKey($eventId, $seatId);
+    public function releaseSeatLock(int $eventId, int $seatId, string $sessionId): bool
+    {
+        $lockKey = $this->getSeatLockKey($eventId, $seatId);
+        $userLocksKey = $this->getUserLocksKey($eventId, $sessionId);
 
-            // 🔥 ATOMIC: Only delete if value matches our sessionId (Lua script)
-            // This prevents other sessions from releasing our locks
-            $result = Redis::eval(
-                "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
-                1,
-                $lockKey,
-                $sessionId
-            );
+        $script = <<<'LUA'
+            if redis.call('get', KEYS[1]) == ARGV[1] then
+                redis.call('srem', KEYS[2], ARGV[2])
+                return redis.call('del', KEYS[1])
+            else
+                return 0
+            end
+        LUA;
 
-            if ($result) {
-                return true;
-            }
-            return false;
-        } catch (\Exception $e) {
-            return false;
-        }
+        return Redis::eval($script, 2, $lockKey, $userLocksKey, $sessionId, (string) $seatId) > 0;
     }
 
     /**
-     * Release multiple seat locks at once
-     * 
-     * @param int $eventId - Event ID
-     * @param array $seatIds - Array of seat IDs to unlock
-     * @param string $sessionId - Session ID that acquired the locks
-     * @return array - ['released' => count, 'failed' => count]
+     * Release multiple seat locks
      */
-    public function releaseBatchLocks(
-        int $eventId,
-        array $seatIds,
-        string $sessionId
-    ): array {
+    public function releaseBatchLocks(int $eventId, array $seatIds, string $sessionId): array
+    {
         $released = 0;
         $failed = 0;
 
         foreach ($seatIds as $seatId) {
-            if ($this->releaseSeatLock($eventId, $seatId, $sessionId)) {
+            if ($this->releaseSeatLock($eventId, (int) $seatId, $sessionId)) {
                 $released++;
             } else {
                 $failed++;
             }
         }
 
-        return [
-            'released' => $released,
-            'failed' => $failed
-        ];
+        return compact('released', 'failed');
     }
 
     /**
-     * Force release a lock (admin/emergency use only)
-     * 
-     * Warning: This bypasses session ID validation and should only be used
-     * in admin interfaces for emergency unlock or cleanup operations.
-     * 
-     * @param int $eventId - Event ID
-     * @param int $seatId - Seat ID
-     * @return bool
+     * Release all locks for a user on an event
+     */
+    public function releaseAllUserLocks(int $eventId, string $sessionId): array
+    {
+        $seats = $this->getUserLocks($eventId, $sessionId);
+
+        return empty($seats)
+            ? ['released' => 0, 'failed' => 0]
+            : $this->releaseBatchLocks($eventId, $seats, $sessionId);
+    }
+
+    /**
+     * Force release (admin only)
      */
     public function forceReleaseLock(int $eventId, int $seatId): bool
     {
-        try {
-            $lockKey = $this->getLockKey($eventId, $seatId);
-            $result = Redis::del($lockKey);
-
-            return $result > 0;
-        } catch (\Exception $e) {
-            return false;
-        }
+        return Redis::del($this->getSeatLockKey($eventId, $seatId)) > 0;
     }
 
     /**
      * Get all locked seats for an event
-     * 
-     * Useful for monitoring and debugging. Returns all seat locks currently
-     * held for a specific event.
-     * 
-     * @param int $eventId - Event ID
-     * @return array - ['seat_id' => 'session_id', ...]
      */
     public function getLockedSeatsForEvent(int $eventId): array
     {
-        try {
-            $pattern = $this->getLockKey($eventId, '*');
-            $keys = Redis::keys($pattern);
+        $pattern = $this->getSeatLockKey($eventId, '*');
+        $keys = Redis::keys($pattern);
 
-            $lockedSeats = [];
-            foreach ($keys as $key) {
-                // Extract seat_id from key format: seat_lock:eventId:seatId
-                preg_match('/seat_lock:\d+:(\d+)/', $key, $matches);
-                if (isset($matches[1])) {
-                    $seatId = $matches[1];
-                    $sessionId = Redis::get($key);
-                    $lockedSeats[$seatId] = $sessionId;
-                }
+        $lockedSeats = [];
+
+        foreach ($keys as $key) {
+            if (preg_match('/seat_lock:\d+:(\d+)/', $key, $matches)) {
+                $seatId = $matches[1];
+                $lockedSeats[$seatId] = Redis::get($this->getSeatLockKey($eventId, $seatId));
             }
-
-            return $lockedSeats;
-        } catch (\Exception $e) {
-            return [];
         }
+
+        return $lockedSeats;
     }
 
     /**
-     * Clear all locks for an event (admin use)
-     * 
-     * Emergency cleanup function. Use with caution!
-     * 
-     * @param int $eventId - Event ID
-     * @return int - Number of locks cleared
+     * Clear all locks for an event (admin)
      */
     public function clearEventLocks(int $eventId): int
     {
-        try {
-            $pattern = $this->getLockKey($eventId, '*');
-            $keys = Redis::keys($pattern);
+        $keys = Redis::keys($this->getSeatLockKey($eventId, '*'));
 
-            if (empty($keys)) {
-                return 0;
-            }
-
-            $count = Redis::del(...$keys);
-            return $count;
-        } catch (\Exception $e) {
-            return 0;
-        }
+        return empty($keys) ? 0 : Redis::del(...$keys);
     }
 
-    /**
-     * Generate Redis lock key
-     * 
-     * Key format: seat_lock:{eventId}:{seatId}
-     * 
-     * @param int $eventId
-     * @param int|string $seatId
-     * @return string
-     */
-    private function getLockKey(int $eventId, $seatId): string
+    private function getSeatLockKey(int $eventId, int|string $seatId): string
     {
         return "seat_lock:{$eventId}:{$seatId}";
+    }
+
+    private function getUserLocksKey(int $eventId, string $sessionId): string
+    {
+        return "user_locks:{$eventId}:{$sessionId}";
     }
 }

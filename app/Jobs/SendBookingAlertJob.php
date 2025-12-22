@@ -64,11 +64,6 @@ class SendBookingAlertJob implements ShouldQueue
      */
     public function handle(BookingAlertService $alertService): void
     {
-        Log::info('SendBookingAlertJob started', [
-            'booking_ids' => $this->bookingIds,
-            'booking_type' => $this->bookingType
-        ]);
-
         $success = $alertService->sendBookingAlerts($this->bookingIds, $this->bookingType);
 
         if ($success) {

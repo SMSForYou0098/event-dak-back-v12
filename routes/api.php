@@ -11,25 +11,6 @@ Route::get('/opration', function () {
     return 'cleared';
 });
 
-// Test route for broadcasting (remove in production)
-Route::post('/test-broadcast', function () {
-    $testContent = new \App\Models\ContentMaster([
-        'id' => 999,
-        'user_id' => 1,
-        'title' => 'Test Broadcast ' . now()->format('H:i:s'),
-        'content' => 'This is a test broadcast message',
-        'type' => 'note'
-    ]);
-
-    event(new \App\Events\ContentMasterUpdated($testContent, 'created'));
-
-    return response()->json([
-        'status' => true,
-        'message' => 'Broadcast sent!',
-        'data' => $testContent
-    ]);
-});
-
 Route::prefix('dark')->group(function () {
     // Public / Webhooks
     require __DIR__ . '/api/public/webhooks.php';

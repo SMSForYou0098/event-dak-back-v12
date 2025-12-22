@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\SeatStatusUpdated;
 use App\Exports\PosExport;
 use App\Jobs\SendBookingAlertJob;
 use App\Models\PosBooking;
@@ -12,6 +13,7 @@ use App\Services\DateRangeService;
 use App\Services\EventSeatStatusService;
 use App\Services\PermissionService;
 use App\Services\SeatLockingService;
+use App\Services\SessionIdService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Maatwebsite\Excel\Facades\Excel;
@@ -25,21 +27,25 @@ class PosController extends Controller
     protected $seatLockingService;
     protected $bookingWithLockingService;
     protected $bookingTaxService;
+    protected $sessionIdService;
 
     public function __construct(
         EventSeatStatusService $eventSeatStatusService,
         SeatLockingService $seatLockingService,
         BookingWithLockingService $bookingWithLockingService,
-        BookingTaxService $bookingTaxService
+        BookingTaxService $bookingTaxService,
+        SessionIdService $sessionIdService
     ) {
         $this->eventSeatStatusService = $eventSeatStatusService;
         $this->seatLockingService = $seatLockingService;
         $this->bookingWithLockingService = $bookingWithLockingService;
         $this->bookingTaxService = $bookingTaxService;
+        $this->sessionIdService = $sessionIdService;
     }
 
     public function index(Request $request, $id, DateRangeService $dateRangeService, PermissionService $permissionService)
     {
+        /** @var \App\Models\User $loggedInUser */
         $loggedInUser = Auth::user();
         $isAdmin = $loggedInUser->hasRole('Admin');
         $userIds = collect();
@@ -266,12 +272,20 @@ class PosController extends Controller
 
             // 🔥 SEAT VALIDATION PHASE - CHECK BEFORE ANY BOOKING
             if ($request->seating_module === true || $request->seating_module === 'true') {
-                $sessionId = $request->sessionId ?? uniqid('pos_', true);
+                $userId = $user ? $user->id : $request->user_id;
+
+                // 1. Session ID for Seat Locking (Redis check)
+                $lockSessionId = $request->session_id ?? $request->sessionId ?? ($userId ? "user_{$userId}" : null);
+
+                // Fallback for lock session if no user/session provided
+                if (!$lockSessionId) {
+                    $lockSessionId = $this->sessionIdService->generateEncryptedSessionId()['original'];
+                }
 
                 $validation = $this->eventSeatStatusService->validateSeatsBeforeBooking(
                     $request->tickets,
                     $this->seatLockingService,
-                    $sessionId
+                    $lockSessionId
                 );
 
                 if (!$validation['valid']) {
@@ -289,7 +303,10 @@ class PosController extends Controller
             $bookings = [];
             $token = $this->generateHexadecimalCode();
             $setId = strtoupper('SET-' . Str::random(10));
-            $sessionId = uniqid('pos_', true);
+
+            // 2. Session ID for Database Storage (Booking record)
+            // Always generate a fresh unique encrypted session ID for the DB record
+            $dbSessionId = $this->sessionIdService->generateEncryptedSessionId()['original'];
 
             foreach ($request->tickets as $ticketData) {
                 $ticket = Ticket::findOrFail($ticketData['id']);
@@ -367,8 +384,23 @@ class PosController extends Controller
                             $ticket->event_id,
                             $event->event_key ?? null,
                             'POS',
-                            $sessionId
+                            $dbSessionId
                         );
+                    }
+                }
+
+                // 🔥 Broadcast Seat Updates for this Ticket
+                if (!empty($ticketData['seats'])) {
+                    $bookedSeatIds = array_column($ticketData['seats'], 'seat_id');
+                    $bookedSeatIds = array_filter($bookedSeatIds); // Remove nulls
+
+                    if (!empty($bookedSeatIds) && env('ENABLE_SEAT_STATUS_UPDATES', true)) {
+                        event(new SeatStatusUpdated(
+                            $ticket->event_id,
+                            $bookedSeatIds,
+                            'booked',
+                            $request->user_id // Pass the lock session ID (user_id based)
+                        ));
                     }
                 }
 

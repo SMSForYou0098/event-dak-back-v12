@@ -21,12 +21,12 @@ class CloseExpiredSales extends Command
         foreach ($tickets as $ticket) {
             if ($ticket->sale_date) {
                 $dates = explode(',', $ticket->sale_date);
-    
+
                 $endDate = isset($dates[1]) ? $dates[1] : $dates[0];
-    
+
                 try {
-                    $end = \Carbon\Carbon::parse(trim($endDate));
-    
+                    $end = Carbon::parse(trim($endDate));
+
                     if ($end->lt($today)) {
                         $ticket->sale = 0;
                         $ticket->save();
@@ -37,7 +37,7 @@ class CloseExpiredSales extends Command
                 }
             }
         }
-    
+
         $this->info("Closed $count expired ticket sales.");
     }
 }

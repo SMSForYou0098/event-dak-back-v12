@@ -5,6 +5,7 @@ use App\Http\Controllers\AdditionalCategoryController;
 use App\Http\Controllers\ArtistController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\EventAttendyFieldController;
+use App\Http\Controllers\EventContactController;
 use App\Http\Controllers\EventController;
 use App\Http\Controllers\EventGetController;
 use App\Http\Controllers\LRowController;
@@ -127,3 +128,6 @@ Route::delete('event-fields-delelte/{id}', [EventAttendyFieldController::class, 
 
 //new
 Route::get('event/category/fields/{eventId}', [CategoryController::class, 'getEventFields']);
+
+// Event Contacts
+Route::post('event/contacts', [EventContactController::class, 'getContacts']);
