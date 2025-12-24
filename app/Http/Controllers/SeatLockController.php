@@ -121,10 +121,11 @@ class SeatLockController extends Controller
 
         $currentLocks = $this->seatLockingService->getUserLocks($eventId, $sessionId);
 
-        if (!empty($currentLocks)) {
+        if (!empty($currentLocks) && env('ENABLE_SEAT_STATUS_UPDATES', true)) {
             $this->seatLockingService->releaseBatchLocks($eventId, $currentLocks, $sessionId);
-
-            event(new SeatStatusUpdated($eventId, $currentLocks, 'available', $userId));
+            if (env('ENABLE_SEAT_STATUS_UPDATES', true)) {
+                event(new SeatStatusUpdated($eventId, $currentLocks, 'available', $userId));
+            }
         }
 
         return response()->json([
@@ -233,8 +234,9 @@ class SeatLockController extends Controller
         }
 
         $this->seatLockingService->releaseBatchLocks($eventId, $seats->all(), $sessionId);
-
-        event(new SeatStatusUpdated($eventId, $seats->all(), 'available', $userId));
+        if (env('ENABLE_SEAT_STATUS_UPDATES', true)) {
+            event(new SeatStatusUpdated($eventId, $seats->all(), 'available', $userId));
+        }
     }
 
     /**
@@ -273,7 +275,7 @@ class SeatLockController extends Controller
         $failedSeats = $result['success'] ? [] : $result['failed_seats'];
 
         $lockedNew = $seats->diff(collect($failedSeats));
-        if ($lockedNew->isNotEmpty()) {
+        if ($lockedNew->isNotEmpty() && env('ENABLE_SEAT_STATUS_UPDATES', true)) {
             event(new SeatStatusUpdated($eventId, $lockedNew->all(), 'locked', $userId));
         }
 

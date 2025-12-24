@@ -26,19 +26,19 @@ class GlobalSearchController extends Controller
                 'user_id',
                 'event_key',
                 'venue_id',
-                'start_date',
-                'end_date',
+                'date_range',
                 'entry_time',
                 'start_time',
                 'end_time'
             ])
             ->with([
                 'eventMedia:event_id,thumbnail',
+                'venue:id,city,name',
                 'venueEvent:org_id,city,state,address',
                 'organizer:id,name,organisation',
                 'categoryDatanew:id,title',
                 'eventControls:id,event_id,status',
-                'tickets:id,event_id,price,sale,sale_start_date,sale_end_date'
+                'tickets:id,event_id,price,sale,sale_price,sale_date'
             ]);
 
         $this->applyFilters($query, $request);
@@ -125,38 +125,68 @@ class GlobalSearchController extends Controller
     }
 
     /**
-     * ✅ NORMALIZED: Clean date column queries
-     * No more SPLIT_PART or CASE statements!
+     * ✅ NORMALIZED: Clean date column queries using date_range
+     * date_range format: "2025-01-01,2025-01-31" or "2025-01-01"
      */
     private function applyLiveEventFilter($query): void
     {
         $today = now()->toDateString();
 
         $query->orWhere(function ($liveQ) use ($today) {
-            $liveQ->where('start_date', '<=', $today)
-                ->where('end_date', '>=', $today)
-                ->whereHas('eventControls', fn($q) => $q->where('status', '1'));
+            $liveQ->where(function ($dateQ) use ($today) {
+                // Handle date_range with comma-separated dates
+                $dateQ->whereRaw("
+                    CASE 
+                        WHEN date_range LIKE '%,%' THEN
+                            SPLIT_PART(date_range, ',', 1)::date <= ? AND 
+                            SPLIT_PART(date_range, ',', 2)::date >= ?
+                        ELSE
+                            date_range::date = ?
+                    END
+                ", [$today, $today, $today]);
+            })
+            ->whereHas('eventControls', fn($q) => $q->where('status', '1'));
         });
     }
 
     /**
-     * ✅ NORMALIZED: Clean offer filter
+     * ✅ NORMALIZED: Clean offer filter using date_range
      */
     private function applyOfferFilter($query): void
     {
         $today = now()->toDateString();
 
         $query->orWhere(function ($offerQ) use ($today) {
-            $offerQ->where('end_date', '>=', $today)
-                ->whereHas('tickets', function ($ticketQ) use ($today) {
-                    $ticketQ->where('sale', 1)
-                        ->where('sale_end_date', '>=', $today);
-                });
+            $offerQ->where(function ($dateQ) use ($today) {
+                // Check if event end date is >= today
+                $dateQ->whereRaw("
+                    CASE 
+                        WHEN date_range LIKE '%,%' THEN
+                            SPLIT_PART(date_range, ',', 2)::date >= ?
+                        ELSE
+                            date_range::date >= ?
+                    END
+                ", [$today, $today]);
+            })
+            ->whereHas('tickets', function ($ticketQ) use ($today) {
+                $ticketQ->where('sale', 1)
+                    ->where(function ($saleQ) use ($today) {
+                        // Check if sale_date is active (end date >= today)
+                        $saleQ->whereRaw("
+                            CASE 
+                                WHEN sale_date LIKE '%,%' THEN
+                                    SPLIT_PART(sale_date, ',', 2)::date >= ?
+                                ELSE
+                                    sale_date::date >= ?
+                            END
+                        ", [$today, $today]);
+                    });
+            });
         });
     }
 
     /**
-     * ✅ NORMALIZED: Clean free events filter
+     * ✅ NORMALIZED: Clean free events filter using date_range
      */
     private function applyFreeEventFilter($query): void
     {
@@ -164,7 +194,17 @@ class GlobalSearchController extends Controller
 
         $query->orWhere(function ($freeQ) use ($today) {
             $freeQ->whereHas('eventControls', fn($q) => $q->where('status', 1))
-                ->where('end_date', '>=', $today)
+                ->where(function ($dateQ) use ($today) {
+                    // Check if event end date is >= today
+                    $dateQ->whereRaw("
+                        CASE 
+                            WHEN date_range LIKE '%,%' THEN
+                                SPLIT_PART(date_range, ',', 2)::date >= ?
+                            ELSE
+                                date_range::date >= ?
+                        END
+                    ", [$today, $today]);
+                })
                 ->whereHas('tickets', fn($q) => $q->where('price', 0));
         });
     }
@@ -187,12 +227,23 @@ class GlobalSearchController extends Controller
         // Laravel 12: whereLike() - automatically case-insensitive
         $query->orWhereLike('name', "%{$searchTerm}%");
 
-        // Search in venue (with Laravel 12 whereLike)
-        $query->orWhereHas('venueEvent', function ($venueQ) use ($searchTerm) {
+        // Search in venue (via venue_id -> venues.id relationship)
+        $query->orWhereHas('venue', function ($venueQ) use ($searchTerm) {
             $venueQ->whereLike('city', "%{$searchTerm}%")
+                ->orWhereLike('name', "%{$searchTerm}%")
                 ->orWhereLike('state', "%{$searchTerm}%")
                 ->orWhereLike('address', "%{$searchTerm}%");
         });
+
+        // Search in venueEvent (via user_id -> venues.org_id) - use subquery to avoid type mismatch
+        $query->orWhereRaw(
+            "CAST(user_id AS VARCHAR) IN (
+                SELECT org_id FROM venues 
+                WHERE (city ILIKE ? OR state ILIKE ? OR address ILIKE ?)
+                AND deleted_at IS NULL
+            )",
+            ["%{$searchTerm}%", "%{$searchTerm}%", "%{$searchTerm}%"]
+        );
 
         // Search by organizer
         $userIds = User::query()

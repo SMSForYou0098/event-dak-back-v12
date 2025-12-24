@@ -119,14 +119,8 @@ class EasebuzzController extends Controller
             // Initiate payment
             $paymentParams = initiate_payment($params, false, $key, $salt, $env);
 
-            // Store booking information
-            if ($request->category === 'Amusement') {
-                $bookings = $this->WebhookService->storeEmusment($request, $session, $txnid, $setId);
-            } else {
-                //return response()->json($request->all());
-                $bookings = $this->WebhookService->store($request, $session, $txnid, $setId);
-                // return $bookings;
-            }
+
+            $bookings = $this->WebhookService->store($request, $session, $txnid, $setId);
 
             $url = ($env == 'test')
                 ? ($config->test_url ?? $adminConfig->test_url ?? null)

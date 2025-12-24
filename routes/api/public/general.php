@@ -55,7 +55,6 @@ Route::get('event-detail/{id}', [EventController::class, 'edit']);
 Route::get('edit-event/{id}/{step}', [EventController::class, 'editevent']);
 Route::get('event-detail-whatsapp/{id}', [EventController::class, 'editWhatsapp']);
 Route::post('/send-email/{id}', [EmailTemplateController::class, 'send']);
-Route::get('/banners', [SettingController::class, 'getBanners']);
 Route::get('banner-list/{type}', [BannerController::class, 'index']);
 Route::get('highlightEvent-list', [HighlightEventController::class, 'index']);
 Route::post('store-device', [UserInfoController::class, 'storeDeviceInfo']);

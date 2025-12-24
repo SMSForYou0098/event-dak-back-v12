@@ -13,7 +13,9 @@ class WhatsappApi extends Model
         'title',
         'user_id',
         'variables',
+        'template_name',
         'url',
+        'custom',
     ];
 
     protected $casts = [

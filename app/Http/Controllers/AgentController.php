@@ -57,10 +57,14 @@ class AgentController extends Controller
             $user = auth()->user();
             $userId = auth()->id() ?? $request->user_id;
 
-            // 🔹 Step 1: Balance Check for Agent
+            // 🔹 Step 1: Balance Check for Agent (Optimized with select and index hint)
             $latestBalance = null;
             if ($user->hasRole('Agent') || $user->hasRole('Sponsor')) {
-                $latestBalance = Balance::where('user_id', $user->id)->latest()->first();
+                // Only select needed columns to reduce memory usage
+                $latestBalance = Balance::select('id', 'user_id', 'total_credits')
+                    ->where('user_id', $user->id)
+                    ->latest('id')
+                    ->first();
 
                 if (!$latestBalance) {
                     return response()->json([
@@ -117,9 +121,23 @@ class AgentController extends Controller
             $bookings = [];
             $totalAmount = 0;
 
-            // 🔹 Step 3: Loop tickets
+            // 🔹 Step 3: Loop tickets (Optimized batch loading)
+            // Preload all tickets at once to reduce N+1 queries
+            $ticketIds = collect($request->tickets)->pluck('id')->toArray();
+            $tickets = Ticket::select('id', 'event_id', 'batch_id', 'remaining_count', 'ticket_quantity')
+                ->whereIn('id', $ticketIds)
+                ->get()
+                ->keyBy('id');
+
             foreach ($request->tickets as $ticketData) {
-                $ticket = Ticket::findOrFail($ticketData['id']);
+                $ticket = $tickets->get($ticketData['id']);
+             
+                if (!$ticket) {
+                    return response()->json([
+                        'status' => false,
+                        'message' => 'Ticket not found.'
+                    ], 404);
+                }
 
                 // Handle both seated and non-seated tickets
                 $hasSeats = isset($ticketData['seats']) && is_array($ticketData['seats']) && count($ticketData['seats']) > 0;
@@ -155,38 +173,37 @@ class AgentController extends Controller
 
                     $token = $this->WebhookService->generateHexadecimalCode();
 
-                    $booking = new Booking();
-                    $booking->ticket_id = $ticketData['id'];
-                    $booking->event_id = $ticket->event_id;
-                    $booking->batch_id = $ticket->batch_id;
-                    $booking->set_id = $setId;
-                    $booking->booking_by = $request->agent_id;
-                    $booking->user_id = $request->user_id;
-                    $booking->session_id = $dbSessionId;
-                    $booking->token = $token;
-                    $booking->email = $request->email;
-                    $booking->name = $request->name;
-                    $booking->number = $request->number;
-                    $booking->type = $request->type;
-                    $booking->payment_method = $request->payment_method;
-                    $booking->booking_type = $type;
-                    $booking->status = 0;
-                    $booking->quantity = 1;
+                    // Prepare booking data as array for potential batch insert
+                    // return $ticketData['id'];
+                    $bookingData = [
+                        'ticket_id' => $ticketData['id'],
+                        'event_id' => $ticket->event_id,
+                        'batch_id' => $ticket->batch_id,
+                        'set_id' => $setId,
+                        'booking_by' => $request->agent_id,
+                        'user_id' => $request->user_id,
+                        'session_id' => $dbSessionId,
+                        'token' => $token,
+                        'email' => $request->email,
+                        'name' => $request->name,
+                        'number' => $request->number,
+                        'type' => $request->type,
+                        'payment_method' => $request->payment_method,
+                        'booking_type' => $type,
+                        'status' => 0,
+                        'quantity' => 1,
+                        'total_amount' => $ticketData['finalAmount'],
+                        'discount' => $ticketData['discountPerUnit'] ?? 0,
+                        'seat_id' => $seat['seat_id'] ?? null,
+                        'seat_name' => $seat['seat_name'] ?? null,
+                        'section_id' => $seat['section_id'] ?? null,
+                        'row_id' => $seat['row_id'] ?? null,
+                        'attendee_id' => $ticketData['attendee_ids'][$index] ?? ($ticketData['attendee_ids'][0] ?? null),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ];
 
-                    // PRICE
-                    $booking->total_amount = $ticketData['finalAmount'];
-                    $booking->discount = $ticketData['discountPerUnit'] ?? 0;
-
-                    // ✔ Seat mapping (null for non-seated tickets)
-                    $booking->seat_id = $seat['seat_id'] ?? null;
-                    $booking->seat_name = $seat['seat_name'] ?? null;
-                    $booking->section_id = $seat['section_id'] ?? null;
-                    $booking->row_id = $seat['row_id'] ?? null;
-
-                    // Attendee
-                    $booking->attendee_id = $ticketData['attendee_ids'][$index] ?? ($ticketData['attendee_ids'][0] ?? null);
-
-                    $booking->save();
+                    $booking = Booking::create($bookingData);
 
                     // 🔥 Booking Tax
                     $this->bookingTaxService->createBookingTax(
@@ -237,29 +254,37 @@ class AgentController extends Controller
                 if ($quantity > 1) {
                     $masterToken = $this->WebhookService->generateHexadecimalCode();
 
-                    $masterBooking = new MasterBooking();
-                    $masterBooking->booking_id = $ticketBookingIds;
-                    $masterBooking->user_id = $request->user_id;
-                    $masterBooking->booking_by = $request->agent_id;
-                    $masterBooking->session_id = $dbSessionId;
-                    $masterBooking->set_id = $setId;
-                    $masterBooking->order_id = $masterToken;
-                    $masterBooking->total_amount = $ticketData['totalFinalAmount'];
-                    $masterBooking->discount = $ticketData['discount'] ?? 0;
-                    $masterBooking->payment_method = $request->payment_method ?? 'cash';
-                    $masterBooking->booking_type = $type;
-                    $masterBooking->save();
+                    $masterBookingData = [
+                        'booking_id' => $ticketBookingIds,
+                        'user_id' => $request->user_id,
+                        'booking_by' => $request->agent_id,
+                        'session_id' => $dbSessionId,
+                        'set_id' => $setId,
+                        'order_id' => $masterToken,
+                        'total_amount' => $ticketData['totalFinalAmount'],
+                        'discount' => $ticketData['discount'] ?? 0,
+                        'payment_method' => $request->payment_method ?? 'cash',
+                        'booking_type' => $type,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ];
 
+                    $masterBooking = MasterBooking::create($masterBookingData);
+
+                    // Use whereIn for batch update instead of individual updates
                     Booking::whereIn('id', $ticketBookingIds)->update(['master_token' => $masterBooking->order_id]);
 
                     $masterBookings[] = $masterBooking->id;
                 }
 
                 // 🔥 UPDATE ticket stock based on seats count
-                $newRemaining = max(0, $remaining - $quantity);
-                $ticket->remaining_count = $newRemaining;
-                $ticket->sold_out = $newRemaining <= 0 ? 1 : 0;
-                $ticket->save();
+                $currentRemaining = (int) $ticket->remaining_count;
+                $newRemaining = max(0, $currentRemaining - $quantity);
+                
+                $ticket->update([
+                    'remaining_count' => (string) $newRemaining,
+                    'sold_out' => $newRemaining <= 0 ? 1 : 0
+                ]);
             }
 
             // 🔹 Deduct Agent Credits
@@ -371,8 +396,26 @@ class AgentController extends Controller
         $loggedInUser = Auth::user();
         $dates = $request->input('date') ? explode(',', $request->input('date')) : [Carbon::today()->format('Y-m-d')];
 
-        $query = Booking::where('booking_type', 'agent')->withTrashed()
-            ->with(['ticket.event.user', 'user', 'agentUser']);
+        // Optimize: Only select needed columns from the start
+        $query = Booking::select([
+                'bookings.id',
+                'bookings.booking_type',
+                'bookings.booking_by',
+                'bookings.session_id',
+                'bookings.created_at',
+                'bookings.deleted_at',
+                'bookings.ticket_id',
+                'bookings.user_id'
+            ])
+            ->where('booking_type', 'agent')
+            ->withTrashed()
+            ->with([
+                'ticket:id,name,event_id',
+                'ticket.event:id,name,user_id',
+                'ticket.event.user:id,organisation',
+                'user:id,name',
+                'agentUser:id,name'
+            ]);
 
         // Role-based filtering
         if ($loggedInUser->hasRole('Admin')) {
@@ -392,19 +435,20 @@ class AgentController extends Controller
             ], 403);
         }
 
-        // Apply date filters
+        // Apply date filters with proper PostgreSQL date handling
         if ($dates) {
             if (count($dates) === 1) {
                 $singleDate = Carbon::parse($dates[0])->toDateString();
-                $query->whereDate('created_at', $singleDate);
+                $query->whereDate('bookings.created_at', $singleDate);
             } elseif (count($dates) === 2) {
                 $startDate = Carbon::parse($dates[0])->startOfDay();
                 $endDate = Carbon::parse($dates[1])->endOfDay();
-                $query->whereBetween('created_at', [$startDate, $endDate]);
+                $query->whereBetween('bookings.created_at', [$startDate, $endDate]);
             }
         }
 
-        $bookings = $query->latest()->get();
+        // Use chunk for large datasets to reduce memory usage
+        $bookings = $query->latest('bookings.created_at')->get();
 
         $grouped = $bookings->groupBy('session_id')->map(function ($group) {
             $first = $group->first();
@@ -637,47 +681,91 @@ class AgentController extends Controller
             ], 403);
         }
 
-        // Common helper function
+        // Common helper function with caching
         $getUserDetails = function ($userId) {
-            $user = User::find($userId);
-            return $user ? [
-                'name' => $user->name ?? null,
-                'number' => $user->number ?? null,
-                'email' => $user->email ?? null,
-            ] : null;
+            return Cache::remember("user_details_{$userId}", 3600, function () use ($userId) {
+                $user = User::select('id', 'name', 'number', 'email')->find($userId);
+                return $user ? [
+                    'name' => $user->name ?? null,
+                    'number' => $user->number ?? null,
+                    'email' => $user->email ?? null,
+                ] : null;
+            });
         };
 
+        // Helper function to get ticket_terms content from ContentMaster
+        $getTicketTermsContent = function ($event) {
+            if (!$event) return null;
+            
+            $ticketTermsId = $event->ticket_terms;
+            if ($ticketTermsId && is_numeric($ticketTermsId)) {
+                try {
+                    $contentMaster = $event->ticket_terms()->select('content')->first();
+                    return $contentMaster ? $contentMaster->content : null;
+                } catch (\Exception $e) {
+                    return null;
+                }
+            }
+            return null;
+        };
+
+        // Optimize: Define eager loading once
+        $eagerLoad = [
+            'attendee:id,name,email,number,photo',
+            'ticket:id,name,price,currency,background_image,event_id',
+            'ticket.event:id,name,venue_id,date_range,start_time,entry_time,end_time,ticket_terms',
+            'ticket.event.venue:id,address,city,state'
+        ];
+
         // ===================== Agent Master (unified) =====================
-        $master = MasterBooking::withTrashed()
+        $master = MasterBooking::select('id', 'order_id', 'booking_id', 'booking_type', 'user_id')
+            ->withTrashed()
             ->where('order_id', $order_id)
             ->where('booking_type', 'agent')
             ->first();
 
         if ($master) {
-            $ids = $master->booking_id;
-            $bookings = Booking::withTrashed()
-                ->whereIn('id', $ids)
-                ->where('booking_type', 'agent')
-                ->with('attendee', 'ticket.event')
-                ->get();
+            $ids = is_array($master->booking_id) ? $master->booking_id : [];
+            if (!empty($ids)) {
+                $bookings = Booking::select('id', 'token', 'booking_type', 'created_at', 'ticket_id', 'attendee_id', 'total_amount')
+                    ->withTrashed()
+                    ->whereIn('id', $ids)
+                    ->where('booking_type', 'agent')
+                    ->with($eagerLoad)
+                    ->get();
+            }
         }
         // ===================== Booking Master =====================
-        elseif ($master = MasterBooking::withTrashed()->where('order_id', $order_id)->first()) {
-            $ids = $master->booking_id;
-            $bookings = Booking::withTrashed()->whereIn('id', $ids)->with('attendee', 'ticket.event')->get();
+        elseif ($master = MasterBooking::select('id', 'order_id', 'booking_id', 'user_id')
+            ->withTrashed()
+            ->where('order_id', $order_id)
+            ->first()
+        ) {
+            $ids = is_array($master->booking_id) ? $master->booking_id : [];
+            if (!empty($ids)) {
+                $bookings = Booking::select('id', 'token', 'created_at', 'ticket_id', 'attendee_id', 'total_amount')
+                    ->withTrashed()
+                    ->whereIn('id', $ids)
+                    ->with($eagerLoad)
+                    ->get();
+            }
         }
         // ===================== Sponsor Master (unified) =====================
-        elseif ($master = MasterBooking::withTrashed()
+        elseif ($master = MasterBooking::select('id', 'order_id', 'booking_id', 'booking_type', 'user_id')
+            ->withTrashed()
             ->where('order_id', $order_id)
             ->where('booking_type', 'sponsor')
             ->first()
         ) {
-            $ids = $master->booking_id;
-            $bookings = Booking::withTrashed()
-                ->whereIn('id', $ids)
-                ->where('booking_type', 'sponsor')
-                ->with('attendee', 'ticket.event')
-                ->get();
+            $ids = is_array($master->booking_id) ? $master->booking_id : [];
+            if (!empty($ids)) {
+                $bookings = Booking::select('id', 'token', 'booking_type', 'created_at', 'ticket_id', 'attendee_id', 'total_amount')
+                    ->withTrashed()
+                    ->whereIn('id', $ids)
+                    ->where('booking_type', 'sponsor')
+                    ->with($eagerLoad)
+                    ->get();
+            }
         }
 
         if (!empty($bookings ?? null)) {
@@ -696,7 +784,7 @@ class AgentController extends Controller
                     'attendee' => $attendee ? [
                         'name' => $attendee->name ?? '',
                         'email' => $attendee->email ?? '',
-                        'phone' => $attendee->mo ?? '',
+                        'phone' => $attendee->number ?? '',
                         'photo' => $attendee->photo ?? null,
                     ] : null,
                 ];
@@ -707,21 +795,20 @@ class AgentController extends Controller
                 'type' => 'master',
                 'card_url' => $firstCardUrl,
                 'ticket' => [
-                    'price' => $bookings[0]->amount ?? null,
+                    'price' => $bookings[0]->total_amount ?? null,
                     'name' => $bookings[0]->ticket->name ?? null,
                     'currency' => $bookings[0]->ticket->currency ?? null,
                 ],
                 'event' => [
                     'name' => $bookings[0]->ticket->event->name ?? null,
-                    'country' => $bookings[0]->ticket->event->country ?? null,
-                    'state' => $bookings[0]->ticket->event->state ?? null,
-                    'city' => $bookings[0]->ticket->event->city ?? null,
+                    'state' => $bookings[0]->ticket->event->venue->state ?? null,
+                    'city' => $bookings[0]->ticket->event->venue->city ?? null,
                     'date_range' => $bookings[0]->ticket->event->date_range ?? null,
                     'start_time' => $bookings[0]->ticket->event->start_time ?? null,
                     'entry_time' => $bookings[0]->ticket->event->entry_time ?? null,
                     'end_time' => $bookings[0]->ticket->event->end_time ?? null,
-                    'address' => $bookings[0]->ticket->event->address ?? null,
-                    'ticket_terms' => $bookings[0]->ticket->event->ticket_terms ?? null,
+                    'address' => $bookings[0]->ticket->event->venue->address ?? null,
+                    'ticket_terms' => $getTicketTermsContent($bookings[0]->ticket->event),
                 ],
                 'tokendata' => $token,
                 'data' => $userArray,
@@ -730,23 +817,26 @@ class AgentController extends Controller
         }
 
         // ===================== Normal Agent (unified) =====================
-        $booking = Booking::withTrashed()
-            ->with('attendee', 'ticket.event')
+        $booking = Booking::select('id', 'token', 'booking_type', 'created_at', 'ticket_id', 'attendee_id', 'user_id', 'total_amount')
+            ->withTrashed()
+            ->with($eagerLoad)
             ->where('token', $order_id)
             ->where('booking_type', 'agent')
             ->first();
         // ===================== Normal Booking =====================
         if (!$booking) {
-            $booking = Booking::withTrashed()
-                ->with('attendee', 'ticket.event')
+            $booking = Booking::select('id', 'token', 'booking_type', 'created_at', 'ticket_id', 'attendee_id', 'user_id', 'total_amount')
+                ->withTrashed()
+                ->with($eagerLoad)
                 ->where('token', $order_id)
                 ->where('booking_type', 'online')
                 ->first();
         }
         // ===================== Normal Sponsor (unified) =====================
         if (!$booking) {
-            $booking = Booking::withTrashed()
-                ->with('attendee', 'ticket.event')
+            $booking = Booking::select('id', 'token', 'booking_type', 'created_at', 'ticket_id', 'attendee_id', 'user_id', 'total_amount')
+                ->withTrashed()
+                ->with($eagerLoad)
                 ->where('token', $order_id)
                 ->where('booking_type', 'sponsor')
                 ->first();
@@ -759,21 +849,20 @@ class AgentController extends Controller
                 'type' => 'normal',
                 'card_url' => $booking->ticket->background_image ?? null,
                 'ticket' => [
-                    'price' => $booking->amount ?? null,
+                    'price' => $booking->total_amount ?? null,
                     'name' => $booking->ticket->name ?? null,
                     'currency' => $booking->ticket->currency ?? null,
                 ],
                 'event' => [
                     'name' => $booking->ticket->event->name ?? null,
-                    'country' => $booking->ticket->event->country ?? null,
-                    'state' => $booking->ticket->event->state ?? null,
-                    'city' => $booking->ticket->event->city ?? null,
+                    'state' => $booking->ticket->event->venue->state ?? null,
+                    'city' => $booking->ticket->event->venue->city ?? null,
                     'date_range' => $booking->ticket->event->date_range ?? null,
                     'start_time' => $booking->ticket->event->start_time ?? null,
                     'entry_time' => $booking->ticket->event->entry_time ?? null,
                     'end_time' => $booking->ticket->event->end_time ?? null,
-                    'address' => $booking->ticket->event->address ?? null,
-                    'ticket_terms' => $booking->ticket->event->ticket_terms ?? null,
+                    'address' => $booking->ticket->event->venue->address ?? null,
+                    'ticket_terms' => $getTicketTermsContent($booking->ticket->event),
                 ],
                 'tokendata' => $token,
                 'data' => [
@@ -783,7 +872,7 @@ class AgentController extends Controller
                         'attendee' => $attendee ? [
                             'name' => $attendee->name ?? '',
                             'email' => $attendee->email ?? '',
-                            'phone' => $attendee->mo ?? '',
+                            'phone' => $attendee->number ?? '',
                             'photo' => $attendee->photo ?? null,
                         ] : null,
                     ]
@@ -804,20 +893,41 @@ class AgentController extends Controller
             return response()->json(['status' => false, 'message' => 'Missing order_id'], 400);
         }
 
-        $eventId =
-            Booking::where('token', $orderId)->value('event_id') ??
-            Booking::where('master_token', $orderId)->value('event_id') ??
-            MasterBooking::where('order_id', $orderId)->value('event_id');
+        // 🔍 STEP 1: Find event_id with optimized query (use UNION for better performance)
+        $eventId = Cache::remember("event_for_order_{$orderId}", 300, function () use ($orderId) {
+            // Try to find in bookings first (most common case)
+            $eventId = Booking::where('token', $orderId)
+                ->orWhere('master_token', $orderId)
+                ->value('event_id');
+            
+            if (!$eventId) {
+                // Then check master bookings
+                $masterBooking = MasterBooking::where('order_id', $orderId)->first();
+                if ($masterBooking && !empty($masterBooking->booking_id)) {
+                    $eventId = Booking::whereIn('id', $masterBooking->booking_id)
+                        ->value('event_id');
+                }
+            }
+            
+            return $eventId;
+        });
 
         // 🔍 STEP 2: If event not found → invalid order
         if (!$eventId) {
             return response()->json(['status' => false, 'message' => 'Invalid order_id'], 403);
         }
 
-        // 🔍 STEP 3: Check event status
-        $event = Event::select('id', 'status')->find($eventId);
+        // 🔍 STEP 3: Check event status with caching (status is in event_controls table)
+        $eventActive = Cache::remember("event_status_{$eventId}", 300, function () use ($eventId) {
+            // Check if event exists and has active status in event_controls
+            return Event::where('id', $eventId)
+                ->whereHas('eventControls', function ($query) {
+                    $query->where('status', 1);
+                })
+                ->exists();
+        });
 
-        if (!$event || $event->status != 1) {
+        if (!$eventActive) {
             return response()->json([
                 'status' => false,
                 'message' => 'Event is not active'
@@ -859,20 +969,8 @@ class AgentController extends Controller
         return response()->json([
             'status' => true,
             'order_id' => $orderId,
+            'group' => $existsInBookingMaster,
             'token' => $token
         ]);
     }
-
-    // private function generateEncryptedSessionId()
-    // {
-    //     // Generate a random session ID
-    //     $originalSessionId = Str::random(32);
-    //     // Encrypt it
-    //     $encryptedSessionId = encrypt($originalSessionId);
-
-    //     return [
-    //         'original' => $originalSessionId,
-    //         'encrypted' => $encryptedSessionId
-    //     ];
-    // }
 }

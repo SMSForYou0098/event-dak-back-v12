@@ -26,12 +26,7 @@ Route::post('email-config', [MailController::class, 'store']);
 
 //setting
 Route::post('/setting', [SettingController::class, 'store']);
-Route::post('/banners', [SettingController::class, 'storeBanner']);
 Route::put('settings/live-user/{id}', [SettingController::class, 'updateLiveUser']);
-Route::post('/sponsorsImages', [SettingController::class, 'sponsorsImages']);
-Route::post('/pcSponsorsImages', [SettingController::class, 'pcSponsorsImages']);
-// Route::get('/getSponsorsImages', [SettingController::class, 'getSponsorsImages']);
-// Route::get('/getPcSponsorsImages', [SettingController::class, 'getPcSponsorsImages']);
 
 //banner
 Route::post('banner-store', [BannerController::class, 'store']);

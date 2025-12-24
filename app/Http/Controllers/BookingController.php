@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Exports\BookingExport;
 use App\Http\Resources\DashboardSummaryResource;
 use App\Jobs\BookingMailJob;
+use App\Jobs\SendBookingAlertJob;
 use App\Models\Booking;
 use App\Models\ComplimentaryBookings;
 use App\Models\Event;
@@ -27,6 +28,8 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 use App\Services\SmsService;
 use App\Services\WhatsappService;
+use App\Services\TemplateReplacementService;
+use App\Services\BookingAlertService;
 use App\Models\WhatsappApi;
 use App\Services\DashboardStatisticsService;
 use Illuminate\Support\Facades\Cache;
@@ -470,11 +473,25 @@ class BookingController extends Controller
             $bookingIds = $masterBooking->booking_id;
             if (is_array($bookingIds)) {
                 $allBookingIds = array_merge($allBookingIds, $bookingIds);
-                $bookings = Booking::whereIn('id', $bookingIds)
+                $bookings = Booking::select([
+                        'id', 'booking_type', 'discount', 'payment_method', 'quantity', 
+                        'seat_name', 'token', 'total_amount', 'ticket_id', 'attendee_id', 
+                        'created_at', 'deleted_at'
+                    ])
+                    ->whereIn('id', $bookingIds)
                     ->whereNull('deleted_at')
-                    ->with(['ticket', 'ticket.event.user', 'ticket.event.Category', 'ticket.event.eventMedia:event_id,thumbnail', 'user', 'attendee'])
+                    ->with([
+                        'ticket:id,name,price,background_image,event_id',
+                        'ticket.event:id,name,start_time,date_range',
+                        'ticket.event.eventMedia:id,event_id,thumbnail',
+                        'attendee'
+                    ])
                     ->latest()
-                    ->get();
+                    ->get()
+                    ->map(function ($booking) {
+                        $booking->is_deleted = $booking->trashed();
+                        return $booking;
+                    });
 
                 $masterBooking->setRelation('bookings', $bookings);
 
@@ -482,7 +499,6 @@ class BookingController extends Controller
                     if ($booking->attendee) {
                         $allAttendees[] = $booking->attendee;
                     }
-                    $booking->is_deleted = $booking->trashed();
                 });
             } else {
                 $masterBooking->setRelation('bookings', collect());
@@ -505,10 +521,18 @@ class BookingController extends Controller
             $bookingIds = $masterBooking->booking_id;
             if (is_array($bookingIds)) {
                 $allAgentBookingIds = array_merge($allAgentBookingIds, $bookingIds);
-                $bookings = Booking::whereIn('id', $bookingIds)
+                $bookings = Booking::select([
+                        'id', 'booking_type', 'discount', 'payment_method', 'quantity', 
+                        'seat_name', 'token', 'total_amount', 'ticket_id', 'created_at', 'deleted_at'
+                    ])
+                    ->whereIn('id', $bookingIds)
                     ->where('booking_type', 'agent')
                     ->whereNull('deleted_at')
-                    ->with(['ticket.event.user', 'ticket.event.Category', 'ticket.event.eventMedia:event_id,thumbnail', 'user'])
+                    ->with([
+                        'ticket:id,name,price,background_image,event_id',
+                        'ticket.event:id,name,start_time,date_range',
+                        'ticket.event.eventMedia:id,event_id,thumbnail'
+                    ])
                     ->latest()
                     ->get();
                 $masterBooking->setRelation('bookings', $bookings);
@@ -521,9 +545,17 @@ class BookingController extends Controller
             return $booking;
         });
 
-        $normalAgentBookings = Booking::where('user_id', $userId)
+        $normalAgentBookings = Booking::select([
+                'id', 'booking_type', 'discount', 'payment_method', 'quantity', 
+                'seat_name', 'token', 'total_amount', 'ticket_id', 'created_at', 'deleted_at'
+            ])
+            ->where('user_id', $userId)
             ->where('booking_type', 'agent')
-            ->with(['ticket.event.user', 'ticket.event.Category', 'ticket.event.eventMedia:event_id,thumbnail', 'user'])
+            ->with([
+                'ticket:id,name,price,background_image,event_id',
+                'ticket.event:id,name,start_time,date_range',
+                'ticket.event.eventMedia:id,event_id,thumbnail'
+            ])
             ->latest()
             ->get()
             ->map(function ($booking) {
@@ -543,10 +575,18 @@ class BookingController extends Controller
             $bookingIds = $masterBooking->booking_id;
             if (is_array($bookingIds)) {
                 $allSponsorBookingIds = array_merge($allSponsorBookingIds, $bookingIds);
-                $bookings = Booking::whereIn('id', $bookingIds)
+                $bookings = Booking::select([
+                        'id', 'booking_type', 'discount', 'payment_method', 'quantity', 
+                        'seat_name', 'token', 'total_amount', 'ticket_id', 'created_at', 'deleted_at'
+                    ])
+                    ->whereIn('id', $bookingIds)
                     ->where('booking_type', 'sponsor')
                     ->whereNull('deleted_at')
-                    ->with(['ticket.event.user', 'ticket.event.Category', 'ticket.event.eventMedia:event_id,thumbnail', 'user'])
+                    ->with([
+                        'ticket:id,name,price,background_image,event_id',
+                        'ticket.event:id,name,start_time,date_range',
+                        'ticket.event.eventMedia:id,event_id,thumbnail'
+                    ])
                     ->latest()
                     ->get();
                 $masterBooking->setRelation('bookings', $bookings);
@@ -559,9 +599,17 @@ class BookingController extends Controller
             return $booking;
         });
 
-        $normalSponsorBooking = Booking::where('user_id', $userId)
+        $normalSponsorBooking = Booking::select([
+                'id', 'booking_type', 'discount', 'payment_method', 'quantity', 
+                'seat_name', 'token', 'total_amount', 'ticket_id', 'created_at', 'deleted_at'
+            ])
+            ->where('user_id', $userId)
             ->where('booking_type', 'sponsor')
-            ->with(['ticket.event.user', 'ticket.event.Category', 'ticket.event.eventMedia:event_id,thumbnail', 'user'])
+            ->with([
+                'ticket:id,name,price,background_image,event_id',
+                'ticket.event:id,name,start_time,date_range',
+                'ticket.event.eventMedia:id,event_id,thumbnail'
+            ])
             ->latest()
             ->get()
             ->map(function ($booking) {
@@ -571,9 +619,18 @@ class BookingController extends Controller
             });
 
         //BOOKING
-        $normalBookings = Booking::where('user_id', $userId)
-            ->with(['ticket.event.user', 'ticket.event.Category', 'ticket.event.eventMedia:event_id,thumbnail', 'user', 'attendee'])
-            // ->with(['ticket.event.user', 'user', 'agent'])
+        $normalBookings = Booking::select([
+                'id', 'booking_type', 'discount', 'payment_method', 'quantity', 
+                'seat_name', 'token', 'total_amount', 'ticket_id', 'attendee_id', 
+                'created_at', 'deleted_at'
+            ])
+            ->where('user_id', $userId)
+            ->with([
+                'ticket:id,name,price,background_image,event_id',
+                'ticket.event:id,name,start_time,date_range',
+                'ticket.event.eventMedia:id,event_id,thumbnail',
+                'attendee'
+            ])
             ->latest()
             ->get()
             ->map(function ($booking) {
@@ -1149,12 +1206,9 @@ class BookingController extends Controller
                 }
             }
 
-            // ✅ Send SMS/WhatsApp for single booking (no master)
-            if ($bookingMaster->isEmpty()) {
-                $firstBooking = Booking::where('session_id', $decryptedSessionId)->latest()->first();
-                if ($firstBooking) {
-                    $this->sendBookingNotification($firstBooking, false, 1, $firstBooking->token);
-                }
+            // ✅ Send SMS/WhatsApp for single booking (no master) - Using Job
+            if ($bookingMaster->isEmpty() && !empty($masterBookingIDs)) {
+                SendBookingAlertJob::dispatch($masterBookingIDs, 'online');
             }
         }
 
@@ -1246,14 +1300,9 @@ class BookingController extends Controller
             $master = MasterBooking::create($data);
 
             if ($master) {
-                // ✅ Get all related bookings
-                $relatedBookings = Booking::whereIn('id', $ids)->with('ticket.event')->get();
-                $totalQty = $relatedBookings->count();
-                $sampleBooking = $relatedBookings->first();
-
-                if ($sampleBooking) {
-                    // ✅ Only one message for all master bookings
-                    $this->sendBookingNotification($sampleBooking, true, $totalQty, $entry->order_id);
+                // ✅ Send SMS/WhatsApp notifications using Job (async)
+                if (!empty($ids)) {
+                    SendBookingAlertJob::dispatch($ids, 'online');
                 }
             } else {
                 return false;
@@ -1263,63 +1312,6 @@ class BookingController extends Controller
         return true;
     }
 
-    private function sendBookingNotification($booking, $isMaster = false, $qty = 1, $orderId = null)
-    {
-        $smsService = new SmsService();
-        $whatsappService = new WhatsappService();
-        $whatsappTemplate = WhatsappApi::where('title', 'Online Booking')->first();
-        $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-        $event = $booking->ticket->event ?? null;
-        if (!$event) return;
-
-        // ✅ Fix: Use order_id for master, token for single
-        $finalOrderId = $isMaster ? $orderId : $booking->token;
-
-        $shortLinksms = "getyourticket.in/t/{$finalOrderId}";
-
-        // Format event date & time
-        $dates = explode(',', $event->date_range ?? '');
-        $formattedDates = [];
-        foreach ($dates as $date) {
-            $formattedDates[] = \Carbon\Carbon::parse($date)->format('d-m-Y');
-        }
-        $dateRangeFormatted = implode(' | ', $formattedDates);
-        $eventDateTime = $dateRangeFormatted . ' | ' . $event->start_time . ' - ' . $event->end_time;
-
-        $mediaurl = $event->thumbnail ?? '';
-
-        $data = (object) [
-            'name' => $booking->name ?? 'Guest',
-            'number' => $booking->number ?? '0000000000',
-            'templateName' => 'Online Booking Template',
-            'whatsappTemplateData' => $whatsappTemplateName,
-            'shortLink' => $finalOrderId,
-            'insta_whts_url' => $event->insta_whts_url ?? 'helloinsta',
-            'mediaurl' => $mediaurl,
-            'values' => [
-                (string) ($booking->name ?? 'Guest'),
-                (string) ($booking->number ?? '0000000000'),
-                (string) ($event->name ?? 'Event'),
-                (string) ($qty),
-                (string) ($booking->ticket->name ?? 'Ticket'),
-                (string) ($event->address ?? 'Venue'),
-                (string) ($eventDateTime ?? 'DateTime'),
-                (string) ($event->whts_note ?? 'hello'),
-            ],
-            'replacements' => [
-                ':C_Name' => $booking->name,
-                ':T_QTY' => $qty,
-                ':Ticket_Name' => $booking->ticket->name ?? 'Ticket',
-                ':Event_Name' => $event->name,
-                ':Event_Date' => $eventDateTime,
-                ':S_Link' => $shortLinksms,
-            ]
-        ];
-
-        $smsService->send($data);
-        $whatsappService->send($data);
-    }
     public function boxOfficeBooking($number)
     {
         $allAttendees = [];
@@ -1341,25 +1333,6 @@ class BookingController extends Controller
         $Masterbookings = $masterBookingIds->isNotEmpty()
             ? MasterBooking::whereIn('session_id', $masterBookingIds)->get()
             : collect();
-
-        // Attach amusement bookings and attendees to each MasterBooking
-        $Masterbookings->each(function ($masterBooking) use (&$allAttendees) {
-            $amusementBookings = AmusementBooking::where('session_id', $masterBooking->session_id)
-                ->whereNull('deleted_at')
-                ->with(['ticket.event.user', 'ticket.event.Category', 'user', 'attendee'])
-                ->latest()
-                ->get()
-                ->map(function ($booking) use (&$allAttendees) {
-                    if ($booking->attendee) {
-                        $allAttendees[] = $booking->attendee;
-                    }
-                    $booking->is_deleted = $booking->trashed();
-                    return $booking;
-                });
-
-            $masterBooking->bookings = $amusementBookings;
-            $masterBooking->attendees = $allAttendees;
-        });
 
         // 3. COMPLIMENTARY BOOKINGS
         $complimentaryBookings = ComplimentaryBookings::where('number', $number)
@@ -1648,235 +1621,6 @@ class BookingController extends Controller
         ];
     }
 
-
-    public function verifyAmusementBooking(Request $request)
-    {
-        $referer = $request->headers->get('referer');
-        $refererDomain = $this->parseDomainFromReferer($referer);
-        $allowedDomain = env('REFERER_DOMAIN', 'getyourticket.in');
-
-        if ($refererDomain !== $allowedDomain) {
-            return response()->json(['error' => 'Access denied.'], 403);
-        }
-
-        try {
-            //$decryptedSessionId = decrypt($request->session_id);
-            $decryptedSessionId = $request->session_id;
-            //return '$decryptedSessionId';
-            if ($decryptedSessionId) {
-                //return $decryptedSessionId;
-                $paymentLog = PaymentLog::where('session_id', $decryptedSessionId)->first();
-
-                if (!$paymentLog) {
-                    return response()->json([
-                        'status' => false,
-                        'message' => 'Payment log not found.'
-                    ], 404);
-                }
-                $status = strtolower(trim($paymentLog->status));
-                $successStatuses = ['success', 'credit', 'completed', 'paid'];
-                $failureStatuses = ['failed', 'failure', 'error', 'cancelled', 'declined'];
-                if (in_array($status, $successStatuses)) {
-                    $status = 'success';
-                } else if (in_array($status, $failureStatuses)) {
-                    $status = 'failed';
-                }
-
-                if ($status != 'success') {
-                    return response()->json([
-                        'status' => false,
-                        'message' => 'Payment Failed.'
-                    ], 400);
-                } else {
-                    $paymentId = null;
-                    if ($paymentLog) {
-                        $paymentId = $paymentLog->payment_id;
-                    }
-                    return $this->verifyAmusementBookingData($decryptedSessionId, $paymentId);
-                }
-            } else {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Invalid session ID or booking not found.'
-                ], 400);
-            }
-        } catch (Exception $e) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Failed to verify booking.',
-                'error' => $e->getMessage(),
-                'line' => $e->getLine()
-            ], 500);
-        }
-    }
-
-    private function verifyAmusementBookingData($decryptedSessionId, $paymentId)
-    {
-
-        $master = AmusementMasterBooking::where('session_id', $decryptedSessionId)->get();
-
-        if (count($master) > 0) {
-            $bookingIds = is_array($master[0]->booking_id) ? $master[0]->booking_id : json_decode($master[0]->booking_id, true);
-
-            $master[0]->bookings = !empty($bookingIds)
-                ? AmusementBooking::whereIn('id', $bookingIds)
-                ->with(['ticket.event.user', 'user', 'attendee'])
-                ->latest()
-                ->get()
-                ->map(function ($booking) {
-                    // Attach event name and organizer to each booking
-                    $booking->event_name = $booking->ticket->event->name;
-                    $booking->organizer = $booking->ticket->event->user->organisation;
-                    $booking->is_deleted = $booking->trashed();
-                    return $booking;
-                })
-                : collect();
-
-            return response()->json([
-                'status' => true,
-                'bookings' => $master,
-                'isMaster' => true
-            ], 200);
-        } else {
-            // Handle single booking if no master booking is found
-            $booking = AmusementBooking::with('ticket.event.user', 'attendee', 'user')
-                ->where('session_id', $decryptedSessionId)
-                ->get()
-                ->map(function ($booking) {
-                    $booking->event_name = $booking->ticket->event->name;
-                    $booking->organizer = $booking->ticket->event->user->organisation;
-                    $booking->is_deleted = $booking->trashed();
-                    return $booking;
-                });
-
-            if ($booking->isNotEmpty()) {
-                return response()->json([
-                    'status' => true,
-                    'bookings' => $booking,
-                    'isMaster' => false
-                ], 200);
-            } else {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'No bookings found for the provided session ID.'
-                ], 404);
-            }
-        }
-    }
-
-    public function resend(Request $request, SmsService $smsService, WhatsappService $whatsappService)
-    {
-        try {
-            $orderId = $request->input('order_id');
-            $tableName = $request->input('table_name'); // booking, agent, corporate_bookings, sponsor_bookings
-            $isMasterBooking = $request->input('is_master_booking', false);
-
-            if (!$orderId || !$tableName) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'order_id and table_name are required',
-                ], 400);
-            }
-
-            // ✅ Table identify & fetch booking
-            switch ($tableName) {
-                case 'booking':
-                    $booking = Booking::where('order_id', $orderId)->first();
-                    break;
-                case 'agent':
-                    $booking = Booking::where('order_id', $orderId)
-                        ->where('booking_type', 'agent')
-                        ->first();
-                    break;
-                case 'sponsor':
-                    $booking = Booking::where('order_id', $orderId)
-                        ->where('booking_type', 'sponsor')
-                        ->first();
-                    break;
-                default:
-                    return response()->json([
-                        'status' => false,
-                        'message' => 'Invalid table_name',
-                    ], 400);
-            }
-
-            if (!$booking) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Booking not found',
-                ], 404);
-            }
-
-            // ✅ Ticket link banavo
-            $token = $booking->token ?? $booking->order_id ?? '';
-            $shortLink = $token;
-            $shortLinksms = "getyourticket.in/t/{$token}";
-
-            // ✅ Whatsapp template fetch
-            $whatsappTemplate = WhatsappApi::where('title', 'Online Booking')->first();
-            $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-            // ✅ Event date formatting
-            $dates = explode(',', $booking->ticket->event->date_range);
-            $formattedDates = [];
-            foreach ($dates as $date) {
-                $formattedDates[] = Carbon::parse($date)->format('d-m-Y');
-            }
-            $dateRangeFormatted = implode(' | ', $formattedDates);
-
-            $eventDateTime = $dateRangeFormatted . ' | ' . $booking->ticket->event->start_time . ' - ' . $booking->ticket->event->end_time;
-            $mediaurl = $booking->ticket->event->thumbnail;
-
-            // ✅ Data object
-            $data = (object) [
-                'name' => $booking->name,
-                'number' => $booking->number,
-                'templateName' => 'Online Booking Template',
-                'whatsappTemplateData' => $whatsappTemplateName,
-                'mediaurl' => $mediaurl,
-                'shortLink' => $shortLink,
-                'insta_whts_url' => $booking->ticket->event->insta_whts_url ?? 'helloinsta',
-                'values' => [
-                    $booking->name,
-                    $booking->number,
-                    $booking->ticket->event->name,
-                    1,
-                    $booking->ticket->name,
-                    $booking->ticket->event->address,
-                    $eventDateTime,
-                    $booking->ticket->event->whts_note ?? 'hello',
-                ],
-                'replacements' => [
-                    ':C_Name' => $booking->name,
-                    ':T_QTY' => 1,
-                    ':Ticket_Name' => $booking->ticket->name,
-                    ':Event_Name' => $booking->ticket->event->name,
-                    ':Event_DateTime' => $eventDateTime,
-                    ':S_Link' => $shortLinksms,
-                ]
-            ];
-
-            // ✅ Resend condition
-            if (!$isMasterBooking && ($request->quantity ?? 1) == 1) {
-                $smsService->send($data);
-                $whatsappService->send($data);
-            }
-
-            return response()->json([
-                'status' => true,
-                'message' => 'Resend successful',
-                'data' => $data
-            ], 200);
-        } catch (Exception $e) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Resend failed',
-                'error' => $e->getMessage()
-            ], 500);
-        }
-    }
-
-
     public function bookingStats($type, $id)
     {
         try {
@@ -1971,7 +1715,7 @@ class BookingController extends Controller
         ]);
     }
 
-    public function eventWiseTicketSales(Request $request, $type = 'online', DateRangeService $dateRangeService)
+    public function eventWiseTicketSales(Request $request, DateRangeService $dateRangeService, $type = 'online')
     {
         $user = Auth::user();
         // return $user;

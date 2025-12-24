@@ -70,11 +70,12 @@ return new class extends Migration
         ];
 
         foreach ($booleanColumns as $column) {
+            // Drop default first, then change type
+            DB::statement("ALTER TABLE event_controls 
+                ALTER COLUMN {$column} DROP DEFAULT");
             DB::statement("ALTER TABLE event_controls 
                 ALTER COLUMN {$column} TYPE BOOLEAN 
                 USING CASE WHEN {$column} = 1 THEN true ELSE false END");
-            DB::statement("ALTER TABLE event_controls 
-                ALTER COLUMN {$column} DROP DEFAULT");
         }
     }
 };

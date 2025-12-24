@@ -5,11 +5,18 @@ namespace App\Http\Controllers;
 use App\Models\Banner;
 use App\Models\Category;
 use App\Models\User;
+use App\Services\BannerService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 
 class BannerController extends Controller
 {
+    protected $bannerService;
+
+    public function __construct(BannerService $bannerService)
+    {
+        $this->bannerService = $bannerService;
+    }
 
     public function allBanners()
     {
@@ -51,39 +58,8 @@ class BannerController extends Controller
     {
         $id = $request->query('id'); // always one query param: id
 
-        $query = Banner::query();
-
-        if ($type) {
-            $query->where('type', $type);
-        }
-
-        // handle type-specific logic
-        if ($type === 'category' && $id) {
-            $category = Category::select('id', 'title')->find($id);
-
-            if ($category) {
-                $query->where('category', $category->id);
-            } else {
-                return response()->json([
-                    'status'  => false,
-                    'message' => 'Category not found',
-                ], 200);
-            }
-        }
-
-        if ($type === 'organisation' && $id) {
-            $query->whereHas('event.user', function ($q) use ($id) {
-                $q->where('id', $id);
-            });
-        }
-
-        $query->with([
-            'event:id,name,user_id,venue_id',
-            'event.user:id,organisation',
-            'event.venue:id,city,name',
-            'category:id,title',
-        ]);
-        $banners = $query->get();
+        // Use BannerService with caching
+        $banners = $this->bannerService->getBannersWithCache($type, $id);
 
         if ($banners->isEmpty()) {
             return response()->json([

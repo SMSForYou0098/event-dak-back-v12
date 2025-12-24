@@ -2,27 +2,20 @@
 
 namespace App\Services;
 
+use App\Jobs\SendBookingAlertJob;
 use App\Models\PenddingBooking;
 use App\Models\PenddingBookingsMaster;
 use App\Models\Booking;
 use App\Models\MasterBooking;
 use App\Models\Ticket;
 use App\Models\Promocode;
-use App\Models\WhatsappApi;
-use App\Services\SmsService;
-use App\Services\WhatsappService;
-use Illuminate\Support\Facades\Log;
 use Exception;
 
 class BookingService
 {
-    protected $smsService;
-    protected $whatsappService;
-
-    public function __construct(SmsService $smsService = null, WhatsappService $whatsappService = null)
+    public function __construct()
     {
-        $this->smsService = $smsService;
-        $this->whatsappService = $whatsappService;
+        // No dependencies needed - using job for notifications
     }
     /**
      * Store pending bookings
@@ -85,12 +78,6 @@ class BookingService
                 'booking_count' => count($bookings)
             ];
         } catch (Exception $e) {
-            Log::error('BookingService - Store Pending Bookings Error: ' . $e->getMessage(), [
-                'session' => $session,
-                'txnid' => $txnid,
-                'line' => $e->getLine(),
-                'file' => $e->getFile()
-            ]);
 
             return [
                 'status' => false,
@@ -151,19 +138,8 @@ class BookingService
             // Load relationships
             $booking->load(['user', 'ticket.event.user.smsConfig']);
 
-            Log::info('Pending booking created successfully', [
-                'booking_id' => $booking->id,
-                'ticket_id' => $booking->ticket_id,
-                'session' => $session
-            ]);
-
             return $booking;
         } catch (Exception $e) {
-            Log::error('BookingService - Create Pending Booking Error: ' . $e->getMessage(), [
-                'index' => $index,
-                'session' => $session,
-                'error' => $e->getMessage()
-            ]);
             return null;
         }
     }
@@ -193,18 +169,8 @@ class BookingService
 
             $penddingBookingsMaster->save();
 
-            Log::info('Pending master booking created successfully', [
-                'master_booking_id' => $penddingBookingsMaster->id,
-                'booking_count' => count($masterBookingData),
-                'session' => $session
-            ]);
-
             return $penddingBookingsMaster;
         } catch (Exception $e) {
-            Log::error('BookingService - Create Pending Master Booking Error: ' . $e->getMessage(), [
-                'session' => $session,
-                'booking_ids' => $masterBookingData
-            ]);
             return null;
         }
     }
@@ -248,7 +214,6 @@ class BookingService
                 'has_master_booking' => $masterBookingsCount > 0
             ];
         } catch (Exception $e) {
-            Log::error('BookingService - Get Booking Stats Error: ' . $e->getMessage());
 
             return [
                 'status' => false,
@@ -268,13 +233,6 @@ class BookingService
         try {
             $bookingsDeleted = PenddingBooking::where('session_id', $session)->delete();
             $masterBookingsDeleted = PenddingBookingsMaster::where('session_id', $session)->delete();
-
-            Log::info('Pending bookings cancelled', [
-                'session' => $session,
-                'bookings_deleted' => $bookingsDeleted,
-                'master_bookings_deleted' => $masterBookingsDeleted
-            ]);
-
             return [
                 'status' => true,
                 'message' => 'Pending bookings cancelled successfully',
@@ -282,7 +240,6 @@ class BookingService
                 'master_bookings_deleted' => $masterBookingsDeleted
             ];
         } catch (Exception $e) {
-            Log::error('BookingService - Cancel Pending Bookings Error: ' . $e->getMessage());
 
             return [
                 'status' => false,
@@ -312,8 +269,6 @@ class BookingService
                 ];
             }
 
-            // Prepare notification data
-            $notificationData = $this->prepareEventNotificationData($bookings);
             $masterBookingIDs = [];
 
             // Process individual bookings
@@ -335,10 +290,9 @@ class BookingService
                 $bookingMaster->each->delete();
             }
 
-            // Send notifications on success
-            if ($status === 'success' && $this->smsService && $this->whatsappService) {
-                $this->smsService->send($notificationData);
-                $this->whatsappService->send($notificationData);
+            // 🔥 Dispatch job to send SMS/WhatsApp notifications (async) - same as AgentController
+            if ($status === 'success' && !empty($masterBookingIDs)) {
+                SendBookingAlertJob::dispatch($masterBookingIDs, 'online');
             }
 
             return [
@@ -348,12 +302,6 @@ class BookingService
                 'payment_status' => $status
             ];
         } catch (Exception $e) {
-            Log::error('BookingService - Transfer Event Booking Error: ' . $e->getMessage(), [
-                'session_id' => $sessionId,
-                'status' => $status,
-                'payment_id' => $paymentId
-            ]);
-
             return [
                 'status' => false,
                 'error' => $e->getMessage()
@@ -403,7 +351,6 @@ class BookingService
 
             return $booking;
         } catch (Exception $e) {
-            Log::error('BookingService - Create Confirmed Event Booking Error: ' . $e->getMessage());
             return null;
         }
     }
@@ -441,7 +388,6 @@ class BookingService
             }
             return true;
         } catch (Exception $e) {
-            Log::error('BookingService - Create Confirmed Master Booking Error: ' . $e->getMessage());
             return false;
         }
     }
@@ -465,52 +411,6 @@ class BookingService
     }
 
     /**
-     * Prepare notification data for event bookings
-     *
-     * @param $bookings
-     * @return object
-     */
-    private function prepareEventNotificationData($bookings)
-    {
-        $firstBooking = $bookings->first();
-        $orderId = $firstBooking->token ?? '';
-        $shortLink = $orderId;
-        $whatsappTemplate = WhatsappApi::where('title', 'garbabookingv2')->first();
-        $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-        $eventDateTime = str_replace(',', ' |', $firstBooking->ticket->event->date_range) . ' | ' .
-            $firstBooking->ticket->event->start_time . ' - ' . $firstBooking->ticket->event->end_time;
-
-        $totalQty = count($bookings);
-        $mediaurl = $firstBooking->ticket->event->thumbnail;
-
-        return (object) [
-            'name' => $firstBooking->name,
-            'number' => $firstBooking->number,
-            'templateName' => 'Booking Template online',
-            'whatsappTemplateData' => $whatsappTemplateName,
-            'mediaurl' => $mediaurl,
-            'shortLink' => $shortLink,
-            'values' => [
-                $firstBooking->name,
-                $firstBooking->number,
-                $firstBooking->ticket->event->name,
-                $totalQty,
-                $firstBooking->ticket->name,
-                $firstBooking->ticket->event->address,
-                $eventDateTime,
-            ],
-            'replacements' => [
-                ':C_Name' => $firstBooking->name,
-                ':T_QTY' => $totalQty,
-                ':Ticket_Name' => $firstBooking->ticket->name,
-                ':Event_Name' => $firstBooking->ticket->event->name,
-                ':C_number' => $firstBooking->number,
-            ]
-        ];
-    }
-
-    /**
      * Process promocode usage
      *
      * @param string|null $promocodeId
@@ -526,7 +426,6 @@ class BookingService
             $promocode = Promocode::where('code', $promocodeId)->first();
 
             if (!$promocode) {
-                Log::warning('Invalid promocode used: ' . $promocodeId);
                 return false;
             }
 
@@ -535,14 +434,12 @@ class BookingService
             } elseif ($promocode->remaining_count > 0) {
                 $promocode->remaining_count--;
             } else {
-                Log::warning('Promocode usage limit reached: ' . $promocodeId);
                 return false;
             }
 
             $promocode->save();
             return true;
         } catch (Exception $e) {
-            Log::error('BookingService - Process Promocode Error: ' . $e->getMessage());
             return false;
         }
     }

@@ -5,13 +5,11 @@ namespace App\Services;
 use App\Models\User;
 use App\Models\SmsTemplate;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
-
 class SmsService
 {
     public function send($data)
     {
-
+        //return $data;
         $number = $data->number;
         $templateName = $data->templateName;
         $config_status = "0";
@@ -30,7 +28,7 @@ class SmsService
         // Step 2: Replace placeholders
         $finalMessage = strtr($messages, $data->replacements ?? []);
 
-
+        //return $finalMessage;
 
         // Step 3: Get admin SMS config if required
         if ($config_status === "0") {

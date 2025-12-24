@@ -20,10 +20,8 @@ class PaymentController extends Controller
 
     public function processPayment(Request $request)
     {
-       
-       // return response()->json($request->all());
+
         $organizerId = $request->organizer_id;
-        // return response()->json($request->all());
         if ($request->event_id) {
             $event = Event::where('event_key', $request->event_id)->first();
 
@@ -94,8 +92,6 @@ class PaymentController extends Controller
                     ->count();
 
                 $data = Booking::where('ticket_id', $ticket->id)->where('number', $number)->get();
-                // return response()->json($data);
-
 
                 $totalAfterNewBooking = $totalBookedByUser + $newQty;
 
@@ -108,13 +104,9 @@ class PaymentController extends Controller
             }
         }
 
-//  return response()->json($request->totalFinalAmount);
-        // Check for 0 amount and ticket quantity > 0
-        // $requestData = json_decode($request->requestData ?? '{}');
         $ticketQty = $request->quantity ?? 0;
         if ($request->totalFinalAmount == "0" && $ticketQty > 0) {
-            // return response()->json($request->totalFinalAmount);
-            $gatewayController = app()->make(\App\Http\Controllers\EasebuzzController::class);
+            $gatewayController = app()->make(EasebuzzController::class);
             return app()->call([$gatewayController, 'initiatePayment'], ['request' => $request]);
         }
 
@@ -126,11 +118,6 @@ class PaymentController extends Controller
                 'message' => 'No active payment gateway available for this organizer.',
             ], 503);
         }
-        // return response()->json([
-        //     'success' => true,
-        //     'message' => 'Payment gateway found',
-        //     'gateway' => $gatewayControllerClass,
-        // ], 200);
         $gatewayController = app()->make($gatewayControllerClass);
         return app()->call([$gatewayController, 'initiatePayment'], ['request' => $request]);
     }

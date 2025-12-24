@@ -106,7 +106,7 @@ class EmailTemplateController extends Controller
     {
 
         $body = $emailTemplate->body;
-        $body = str_replace(':OTP:', $request->otp, $body);
+        $body = str_replace('{{otp}}', $request->otp, $body);
         $subject = $emailTemplate->subject;
         return $this->SendEmail($email, $subject, $body);
     }

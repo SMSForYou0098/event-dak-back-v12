@@ -202,10 +202,8 @@ class BalanceController extends Controller
                 'Booking',
                 'AgentBooking',
                 'ExhibitionBooking',
-                'AmusementBooking',
                 'ComplimentaryBookings',
                 'MasterBooking',
-                'AmusementMasterBooking',
                 'AgentMasterBooking'
             ];
             $filteredBooking = null;

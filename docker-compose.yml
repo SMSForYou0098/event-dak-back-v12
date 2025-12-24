@@ -1,0 +1,92 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gyt_app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/var/www/html
+    environment:
+      - APP_ENV=local
+      - APP_DEBUG=true
+      - DB_CONNECTION=pgsql
+      - DB_HOST=pgsql
+      - DB_PORT=5432
+      - DB_DATABASE=event-v12
+      - DB_USERNAME=dev
+      - DB_PASSWORD=password
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CACHE_DRIVER=redis
+      - QUEUE_CONNECTION=redis
+      - SESSION_DRIVER=redis
+    depends_on:
+      - pgsql
+      - redis
+    networks:
+      - gyt_network
+
+  queue:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gyt_queue
+    restart: unless-stopped
+    command: php artisan queue:work redis --sleep=3 --tries=3 --max-time=3600
+    volumes:
+      - .:/var/www/html
+    environment:
+      - APP_ENV=local
+      - DB_CONNECTION=pgsql
+      - DB_HOST=pgsql
+      - DB_PORT=5432
+      - DB_DATABASE=event-v12
+      - DB_USERNAME=dev
+      - DB_PASSWORD=password
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - QUEUE_CONNECTION=redis
+    depends_on:
+      - pgsql
+      - redis
+      - app
+    networks:
+      - gyt_network
+
+  pgsql:
+    image: postgres:16-alpine
+    container_name: gyt_pgsql
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_DB=event-v12
+      - POSTGRES_USER=dev
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - pgsql_data:/var/lib/postgresql/data
+    networks:
+      - gyt_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: gyt_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - gyt_network
+
+networks:
+  gyt_network:
+    driver: bridge
+
+volumes:
+  pgsql_data:
+  redis_data:

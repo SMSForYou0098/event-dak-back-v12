@@ -3,57 +3,159 @@
 
 namespace App\Services;
 
+use App\Models\AiApiKey;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
 
 class SeoGeneratorService
 {
-    protected ?string $apiKey;
-    protected string $baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-    protected string $model = 'gemini-2.5-flash';
+    protected ?AiApiKey $currentApiKey = null;
+    protected AiApiKeyService $apiKeyService;
 
-    public function __construct()
+    public function __construct(AiApiKeyService $apiKeyService)
     {
-        $this->apiKey = config('gemini.api_key');
+        $this->apiKeyService = $apiKeyService;
     }
 
     public function generateEventSeo(array $eventData): array
     {
-        // Return fallback if API key is not configured
-        if (empty($this->apiKey)) {
-            Log::warning('Gemini API key not configured, using fallback SEO');
-            return $this->getFallbackSeo($eventData);
+        // Get next API key using round-robin
+        $this->currentApiKey = $this->apiKeyService->getNextApiKey();
+
+        // Return fallback if no active API keys
+        if (!$this->currentApiKey) {
+            Log::warning('No active AI API keys found, using fallback SEO');
+            $result = $this->getFallbackSeo($eventData);
+            $result['used_model'] = 'fallback';
+            return $result;
         }
 
         $prompt = $this->buildPrompt($eventData);
 
         try {
-            $response = Http::withHeaders([
-                'x-goog-api-key' => $this->apiKey,
-                'Content-Type' => 'application/json',
-            ])->timeout(30)->post("{$this->baseUrl}/models/{$this->model}:generateContent", [
-                'contents' => [
-                    [
-                        'parts' => [
-                            ['text' => $prompt]
-                        ]
-                    ]
-                ]
-            ]);
+            // Route to appropriate AI provider based on model
+            $response = $this->callAiProvider($prompt);
 
-            if ($response->failed()) {
-                //Log::error('Gemini API error: ' . $response->body());
-                return $this->getFallbackSeo($eventData);
+            if (!$response) {
+                $result = $this->getFallbackSeo($eventData);
+                $result['used_model'] = 'fallback';
+                return $result;
             }
 
-            $text = $response->json('candidates.0.content.parts.0.text');
-
-            return $this->parseResponse($text, $eventData);
+            $result = $this->parseResponse($response, $eventData);
+            //$result['used_model'] = $this->currentApiKey->model;
+            return $result;
         } catch (\Exception $e) {
-            // Log::error('Gemini API exception: ' . $e->getMessage());
-            return $this->getFallbackSeo($eventData);
+            Log::error("AI API exception ({$this->currentApiKey->model}): " . $e->getMessage());
+            $result = $this->getFallbackSeo($eventData);
+            $result['used_model'] = 'fallback';
+            return $result;
         }
+    }
+
+    /**
+     * Call the appropriate AI provider based on the model
+     */
+    protected function callAiProvider(string $prompt): ?string
+    {
+        $model = strtolower($this->currentApiKey->model);
+
+        if (str_contains($model, 'gemini')) {
+            return $this->callGemini($prompt);
+        } elseif (str_contains($model, 'perplexity') || str_contains($model, 'sonar')) {
+            return $this->callPerplexity($prompt);
+        } elseif (str_contains($model, 'gpt') || str_contains($model, 'openai')) {
+            return $this->callOpenAI($prompt);
+        }
+
+        Log::warning("Unknown AI model: {$this->currentApiKey->model}");
+        return null;
+    }
+
+    /**
+     * Call Gemini API
+     */
+    protected function callGemini(string $prompt): ?string
+    {
+        $baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
+        $model = $this->currentApiKey->model;
+
+        $response = Http::withHeaders([
+            'x-goog-api-key' => $this->currentApiKey->apikey,
+            'Content-Type' => 'application/json',
+        ])->timeout(30)->post("{$baseUrl}/models/{$model}:generateContent", [
+            'contents' => [
+                [
+                    'parts' => [
+                        ['text' => $prompt]
+                    ]
+                ]
+            ]
+        ]);
+
+        if ($response->failed()) {
+            Log::error('Gemini API error: ' . $response->body());
+            return null;
+        }
+
+        return $response->json('candidates.0.content.parts.0.text');
+    }
+
+    /**
+     * Call Perplexity API
+     */
+    protected function callPerplexity(string $prompt): ?string
+    {
+        $baseUrl = 'https://api.perplexity.ai';
+
+        $response = Http::withHeaders([
+            'Authorization' => 'Bearer ' . $this->currentApiKey->apikey,
+            'Content-Type' => 'application/json',
+        ])->timeout(30)->post("{$baseUrl}/chat/completions", [
+            'model' => 'sonar-pro',
+            'messages' => [
+                [
+                    'role' => 'user',
+                    'content' => $prompt
+                ]
+            ]
+        ]);
+
+        if ($response->failed()) {
+            Log::error('Perplexity API error: ' . $response->body());
+            return null;
+        }
+
+        return $response->json('choices.0.message.content');
+    }
+
+    /**
+     * Call OpenAI API
+     */
+    protected function callOpenAI(string $prompt): ?string
+    {
+        $baseUrl = 'https://api.openai.com/v1';
+
+        $response = Http::withHeaders([
+            'Authorization' => 'Bearer ' . $this->currentApiKey->apikey,
+            'Content-Type' => 'application/json',
+        ])->timeout(30)->post("{$baseUrl}/chat/completions", [
+            'model' => 'gpt-3.5-turbo',
+            'messages' => [
+                [
+                    'role' => 'user',
+                    'content' => $prompt
+                ]
+            ]
+        ]);
+
+        if ($response->failed()) {
+            Log::error('OpenAI API error: ' . $response->body());
+            return null;
+        }
+
+        return $response->json('choices.0.message.content');
     }
 
     protected function buildPrompt(array $eventData): string

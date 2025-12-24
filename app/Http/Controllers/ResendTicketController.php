@@ -2,150 +2,108 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\SendBookingAlertJob;
+use App\Models\Booking;
 use App\Models\MasterBooking;
-use App\Models\WhatsappApi;
-use App\Services\SmsService;
-use App\Services\TicketMessageService;
-use App\Services\WhatsappService;
+use Exception;
 use Illuminate\Http\Request;
 
 class ResendTicketController extends Controller
 {
+
     public function resendTicket(Request $request)
     {
         try {
-            $tableName = strtolower($request->table_name);
-            $isMaster  = $request->is_master;
-            $orderId   = $request->order_id;
-            $setId     = $request->set_id;
+            $orderId = $request->input('order_id');
+            $tableName = $request->input('table_name'); // booking, agent, sponsor
+            $isMaster = $request->input('is_master', false);
 
-            // 🧩 Always use Booking model for agent/sponsor/booking/masterbooking/online
-            if (in_array($tableName, ['agent', 'sponsor', 'booking', 'masterbooking', 'online'])) {
-                $modelClass = "\\App\\Models\\Booking";
-            } elseif ($tableName === 'online_master') {
-                $modelClass = MasterBooking::class;
-            } else {
-                $modelClass = "\\App\\Models\\" . ucfirst($tableName);
+            if (!$orderId || !$tableName) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'order_id and table_name are required',
+                ], 400);
             }
 
-            if (!class_exists($modelClass)) {
-                return response()->json(['status' => false, 'message' => 'Invalid table name'], 400);
+            // ✅ Determine booking type from table_name
+            $bookingType = match($tableName) {
+                'booking' => 'online',
+                'agent' => 'agent',
+                'sponsor' => 'sponsor',
+                default => null
+            };
+
+            if (!$bookingType) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Invalid table_name. Allowed: booking, agent, sponsor',
+                ], 400);
             }
 
-            // 🟢 STEP 1: Fetch record(s)
-               if ($isMaster || !empty($setId) || $tableName === 'online_master') {
+            $bookingIds = [];
 
-            // Default query
-            $query = $modelClass::query();
+            // ✅ If is_master = true, fetch from MasterBooking table
+            if ($isMaster === true) {
+                $masterBooking = MasterBooking::where('order_id', $orderId)->first();
 
-            // 🔹 For ONLINE master bookings → use MasterBooking and match by order_id
-            if ($tableName === 'online_master') {
-                $master = \App\Models\MasterBooking::where('order_id', $orderId)->first();
-
-                if (!$master) {
+                if (!$masterBooking) {
                     return response()->json([
                         'status' => false,
-                        'message' => 'Master booking not found'
+                        'message' => 'Master booking not found',
                     ], 404);
                 }
 
-                // 🔹 Fetch child bookings using set_id from MasterBooking
-                $bookings = \App\Models\Booking::where('set_id', $master->set_id)->get();
+                // Get booking IDs from master_booking.booking_id (array)
+                $bookingIds = $masterBooking->booking_id ?? [];
+
+                if (empty($bookingIds)) {
+                    return response()->json([
+                        'status' => false,
+                        'message' => 'No bookings found in master booking',
+                    ], 404);
+                }
+            } 
+            // ✅ If is_master = false or not specified, fetch directly from Booking table
+            else {
+                $bookingQuery = Booking::where('token', $orderId);
+                
+                if ($bookingType !== 'online') {
+                    $bookingQuery->where('booking_type', $bookingType);
+                }
+
+                // If is_master = false, get child bookings only
+                if ($isMaster === false) {
+                    $bookingQuery->whereNotNull('set_id'); // Child bookings have set_id
+                }
+
+                $bookings = $bookingQuery->get();
 
                 if ($bookings->isEmpty()) {
                     return response()->json([
                         'status' => false,
-                        'message' => 'No child bookings found under this master booking'
+                        'message' => 'Booking not found',
                     ], 404);
                 }
 
-                $booking = $bookings->first();
-            } else {
-                // 🔹 Non-online master bookings → use set_id
-                $query->where('set_id', $setId);
-
-                // 🔹 If agent/sponsor/online → filter by booking_type
-                if (in_array($tableName, ['agent', 'sponsor', 'online'])) {
-                    $query->where('booking_type', $tableName);
-                }
-
-                $bookings = $query->get();
-                $booking  = $bookings->first();
+                $bookingIds = $bookings->pluck('id')->toArray();
             }
 
-        } else {
-            // 🟣 For single bookings (non-master)
-            $query = $modelClass::query()
-                ->where(function ($q) use ($orderId) {
-                    $q->where('token', $orderId)
-                      ->orWhere('order_id', $orderId);
-                });
-
-            if (in_array($tableName, ['agent', 'sponsor', 'online'])) {
-                $query->where('booking_type', $tableName);
-            }
-
-            $booking  = $query->first();
-            $bookings = collect([$booking]);
-        }
-
-            // 🟡 Validation
-            if (!$booking) {
-                return response()->json([
-                    'status' => false,
-                    'debug' => [
-                        'table_name' => $tableName,
-                        'is_master' => $isMaster,
-                        'order_id' => $orderId,
-                        'set_id' => $setId,
-                    ],
-                    'message' => 'Booking not found',
-                ], 404);
-            }
-
-            // 🟢 STEP 2: Get Event & Ticket
-            $event  = $booking->ticket->event ?? null;
-            $ticket = $booking->ticket ?? null;
-          
-            if (!$event || !$ticket) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Event or ticket details missing'
-                ], 404);
-            }
-
-            // 🕒 Format date range
-            $dates = explode(',', $event->date_range);
-            $formattedDates = collect($dates)
-                ->map(fn($d) => \Carbon\Carbon::parse($d)->format('d-m-Y'))
-                ->implode(' | ');
-            $eventDateTime = "{$formattedDates} | {$event->start_time} - {$event->end_time}";
-
-            // 🧾 Prepare message data
-            $ticketMessageService = new TicketMessageService();
-            $data = $ticketMessageService->prepareData(
-                $tableName,
-                $booking,
-                $bookings,
-                $event,
-                $ticket,
-                $orderId,
-                $eventDateTime
-            );
-
-            // 📨 Send via SMS & WhatsApp
-            (new SmsService)->send($data);
-            (new WhatsappService)->send($data);
+            // ✅ Dispatch job with booking IDs - same as AgentController!
+            SendBookingAlertJob::dispatch($bookingIds, $bookingType);
 
             return response()->json([
                 'status' => true,
-                'message' => 'Ticket resent successfully'
+                'message' => 'Resend job dispatched successfully',
+                'booking_ids' => $bookingIds,
+                'booking_type' => $bookingType,
+                'is_master' => $isMaster
             ], 200);
-        } catch (\Exception $e) {
+
+        } catch (Exception $e) {
             return response()->json([
                 'status' => false,
-                'message' => 'Something went wrong',
-                'error' => $e->getMessage(),
+                'message' => 'Resend failed',
+                'error' => $e->getMessage()
             ], 500);
         }
     }

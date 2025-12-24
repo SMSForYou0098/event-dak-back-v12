@@ -6,10 +6,12 @@ use App\Models\EmailConfig;
 use Illuminate\Support\ServiceProvider;
 use App\Channels\FirebaseChannel;
 use App\Models\Artist;
+use App\Models\Banner;
 use App\Models\Category;
 use App\Models\Event;
 use App\Models\Venue;
 use App\Observers\ArtistObserver;
+use App\Observers\BannerObserver;
 use App\Observers\CategoryObserver;
 use App\Observers\EventObserver;
 use App\Observers\VenueObserver;
@@ -38,6 +40,7 @@ class AppServiceProvider extends ServiceProvider
         Venue::observe(VenueObserver::class);
         Category::observe(CategoryObserver::class);
         Artist::observe(ArtistObserver::class);
+        Banner::observe(BannerObserver::class);
 
         Notification::extend('firebase', function ($app) {
             return new FirebaseChannel();

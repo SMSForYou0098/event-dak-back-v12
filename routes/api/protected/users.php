@@ -39,7 +39,7 @@ Route::post('/user-permission/{id}', [RolePermissionController::class, 'giveUser
 
 //user route
 Route::get('users', [UserController::class, 'index'])->middleware('permission:View User');
-Route::get('users/list', [UserController::class, 'indexlist']);
+Route::get('users/list', [UserController::class, 'getOrganizers']);
 Route::get('users-by-role/{role}', [UserController::class, 'getUsersByRole']);
 Route::delete('user-delete/{id}', [UserController::class, 'destroy'])
     ->middleware('permission:Delete User');

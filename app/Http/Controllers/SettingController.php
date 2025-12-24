@@ -12,53 +12,8 @@ class SettingController extends Controller
 {
     public function index()
     {
-       $settings = Setting::select('id', 'app_name','auth_logo','copyright','copyright_link','favicon','home_divider','home_divider_url','live_user','logo','meta_description','meta_tag','meta_title','missed_call_no','mo_logo','notify_req','site_credit','whatsapp_number')->first();
+       $settings = Setting::select('id', 'app_name','auth_logo','copyright','copyright_link','favicon','live_user','logo','meta_description','meta_tag','meta_title','missed_call_no','mo_logo','notify_req','site_credit','whatsapp_number')->first();
         return response()->json(['status' => true, 'data' => $settings], 200);
-    }
-
-    //kinjal
-
-    public function storeBanner(Request $request)
-    {
-        $settings = Setting::find(1);
-        $banners = [];
-        $index = 1;
-
-        while ($request->has("banners_{$index}_pcUrl") || $request->has("banners_{$index}_mobileUrl") || $request->has("banners_{$index}_redirectUrl") || $request->has("banners_{$index}_type")) {
-            $bannerData = [
-                'banners_' . $index . '_mobileUrl' => null,
-                'banners_' . $index . '_pcUrl' => null,
-                'banners_' . $index . '_redirectUrl' => $request->input("banners_{$index}_redirectUrl"),
-                'banners_' . $index . '_type' => $request->input("banners_{$index}_type"),
-            ];
-
-            if ($request->hasFile("banners_{$index}_mobileUrl") && $request->file("banners_{$index}_mobileUrl") instanceof \Illuminate\Http\UploadedFile) {
-                $mobilePath = $request->file("banners_{$index}_mobileUrl")->store('uploads/system/SuccessfulEvent/banners/mobile', 'public');
-                $bannerData['banners_' . $index . '_mobileUrl'] = asset($mobilePath);
-            } else {
-                // Fallback for when no new file uploaded but input has old URL
-                $bannerData['banners_' . $index . '_mobileUrl'] = $request->input("banners_{$index}_mobileUrl");
-            }
-
-            if ($request->hasFile("banners_{$index}_pcUrl") && $request->file("banners_{$index}_pcUrl") instanceof \Illuminate\Http\UploadedFile) {
-                $pcPath = $request->file("banners_{$index}_pcUrl")->store('uploads/system/SuccessfulEvent/banners/pc', 'public');
-                $bannerData['banners_' . $index . '_pcUrl'] = asset($pcPath);
-            } else {
-                // Fallback for when no new file uploaded but input has old URL
-                $bannerData['banners_' . $index . '_pcUrl'] = $request->input("banners_{$index}_pcUrl");
-            }
-
-            $banners[] = $bannerData;
-            $index++;
-        }
-
-        if ($settings) {
-            $settings->update(['banners' => json_encode($banners)]);
-        } else {
-            Setting::create(['id' => 1, 'banners' => json_encode($banners)]);
-        }
-
-        return response()->json(['status' => true, 'message' => 'Banners saved successfully.', 'data' => $banners]);
     }
 
     public function store(Request $request)
@@ -92,11 +47,6 @@ class SettingController extends Controller
             $settings->footer_email = $request->input('footer_email', $settings->footer_email);
             $settings->footer_whatsapp_number = $request->input('footer_whatsapp_number', $settings->footer_whatsapp_number);
             $settings->notify_req = $request->input('notify_req', $settings->notify_req);
-            $settings->home_divider_url = $request->input('home_divider_url', $settings->home_divider_url);
-            $settings->navColor = $request->input('navColor', $settings->navColor);
-            $settings->fontColor = $request->input('fontColor', $settings->fontColor);
-            $settings->footer_font_Color = $request->input('footer_font_Color', $settings->footer_font_Color);
-            $settings->home_bg_color = $request->input('home_bg_color', $settings->home_bg_color);
 
             // Handle file uploads
             if ($request->hasFile('logo')) {
@@ -120,15 +70,6 @@ class SettingController extends Controller
             if ($request->hasFile('footer_bg')) {
                 $settings->footer_bg = storeFile($request->file('footer_bg'));
             }
-            if ($request->hasFile('home_divider')) {
-                $settings->home_divider = storeFile($request->file('home_divider'));
-            }
-            if ($request->hasFile('e_signature')) {
-                $settings->e_signature = storeFile($request->file('e_signature'));
-            }
-            if ($request->hasFile('agreement_pdf')) {
-                $settings->agreement_pdf = storeFile($request->file('agreement_pdf'));
-            }
 
             // Save the settings
             $settings->save();
@@ -139,22 +80,6 @@ class SettingController extends Controller
         }
     }
 
-
-    public function getBanners()
-    {
-        $settings = Setting::first();
-        $banners = json_decode($settings->banners, true); // decode as associative array
-        $lastUpdated = $settings->updated_at;
-    
-        // Reverse the banners array so that last banner comes first
-        $reversedBanners = array_reverse($banners);
-    
-        return response()->json([
-            'banners' => $reversedBanners,
-            'last_updated' => $lastUpdated,
-        ]);
-    }
-    
 
     public function updateLiveUser(Request $request, $id)
     {
@@ -175,97 +100,6 @@ class SettingController extends Controller
         } catch (\Exception $e) {
             return response()->json(['status' => false, 'message' => 'Setting not found or update failed'], 404);
         }
-    }
-
-    public function sponsorsImages(Request $request)
-    {
-        $imageUrls = [];
-
-        for ($i = 1; $i <= 4; $i++) {
-            if ($request->hasFile("image_$i")) {
-                $image = $request->file("image_$i");
-
-                if ($image instanceof \Illuminate\Http\UploadedFile) {
-                    $eventDirectory = 'sponsors_images';
-                    $fileName = 'get-your-ticket-' . uniqid() . '_' . $image->getClientOriginalName();
-                    $path = $image->storeFile("uploads/$eventDirectory", $fileName, 'public');
-                    $imageUrls[] = Storage::disk('public')->url($path);
-                }
-            }
-        }
-        $sponsor = Setting::where('id', 1)->update([
-            'sponsors_images' => json_encode($imageUrls),
-        ]);
-
-        return response()->json([
-            'status' => true,
-            'message' => 'Images uploaded successfully',
-            'data' => $imageUrls,
-        ], 201);
-    }
-
-    public function getSponsorsImages()
-    {
-        // Fetch the setting record with id = 1
-        $sponsorSetting = Setting::where('id', 1)->first();
-
-        // Decode the JSON-encoded sponsors_images field
-        $imageUrls = json_decode($sponsorSetting->sponsors_images, true);
-
-        // Return the image URLs in the response
-        return response()->json([
-            'status' => true,
-            'message' => 'Sponsors images fetched successfully',
-            'data' => $imageUrls, // Return the array of image URLs
-        ], 200);
-    }
-
-    public function pcSponsorsImages(Request $request)
-    {
-        $imageUrls = [];
-
-        for ($i = 1; $i <= 4; $i++) {
-            if ($request->hasFile("image_$i")) {
-                $image = $request->file("image_$i");
-
-                if ($image instanceof \Illuminate\Http\UploadedFile) {
-                    $eventDirectory = 'pc_sponsors_images';
-
-                    // Generate a unique file name with "get-your-ticket-" prefix
-                    $fileName = 'get-your-ticket-' . uniqid() . '_' . $image->getClientOriginalName();
-
-                    // Store the file with the new name
-                    $path = $image->storeFile("uploads/$eventDirectory", $fileName, 'public');
-
-                    // Get the URL of the stored file
-                    $imageUrls[] = Storage::disk('public')->url($path);
-                }
-            }
-        }
-        $sponsor = Setting::where('id', 1)->update([
-            'pc_sponsors_images' => json_encode($imageUrls),
-        ]);
-
-        return response()->json([
-            'status' => true,
-            'message' => 'Images uploaded successfully',
-            'data' => $imageUrls,
-        ], 201);
-    }
-
-    public function getPcSponsorsImages()
-    {
-        // Fetch the setting record with id = 1
-        $sponsorSetting = Setting::where('id', 1)->first();
-
-        $imageUrls = json_decode($sponsorSetting->pc_sponsors_images, true);
-
-        // Return the image URLs in the response
-        return response()->json([
-            'status' => true,
-            'message' => 'Sponsors images fetched successfully',
-            'data' => $imageUrls, // Return the array of image URLs
-        ], 200);
     }
 
     public function footerDataGet()

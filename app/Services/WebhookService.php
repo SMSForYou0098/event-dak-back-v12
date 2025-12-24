@@ -8,7 +8,6 @@ use App\Models\Booking;
 use App\Models\PenddingBooking;
 use App\Models\Attndy;
 use App\Models\BookingTax;
-use App\Models\CardBooking;
 use App\Models\EasebuzzConfig;
 use App\Models\EventSeatStatus;
 use App\Models\MasterBooking;
@@ -16,9 +15,8 @@ use App\Models\PaymentLog;
 use App\Models\PenddingBookingsMaster;
 use App\Models\PromoCode;
 use App\Models\Ticket;
-use App\Models\WhatsappApi;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
+use App\Jobs\SendBookingAlertJob;
 
 class WebhookService
 {
@@ -45,7 +43,6 @@ class WebhookService
 
     public function process($gateway, $params)
     {
-        Log::info("[$gateway] Processing webhook in service...", $params);
 
         try {
             $sessionId = null;
@@ -119,7 +116,6 @@ class WebhookService
                 $statusRaw = $params['status'] ?? null;
                 $status = strtolower(trim($statusRaw));
                 if (!$status) {
-                    Log::warning("[$gateway] Missing 'status' in webhook.");
                     return response()->json(['error' => 'Missing status field'], 400);
                 }
 
@@ -128,7 +124,6 @@ class WebhookService
                 //return response()->json(['$paymentId' => $paymentId], 400);
                 // Extract session ID from surl for Easebuzz
                 if (!isset($params['surl'])) {
-                    Log::warning("[$gateway] Missing 'surl' in webhook.");
                     return response()->json(['error' => 'Missing surl'], 400);
                 }
                 $urlData = $this->extractLastPathSegment($params['surl']);
@@ -142,7 +137,6 @@ class WebhookService
 
                 // Extract session ID and category from URL parameters
                 if (!isset($params['sessionId']) || !isset($params['category'])) {
-                    Log::warning("[$gateway] Missing session_id or category in webhook URL.");
                     return response()->json(['error' => 'Missing required parameters'], 400);
                 }
 
@@ -167,7 +161,6 @@ class WebhookService
                 } elseif (in_array($status, $failureStatuses)) {
                     $status = 'failed';
                 } else {
-                    Log::warning("[$gateway] Unknown status value: $status");
                     return response()->json(['error' => 'Unknown status value'], 400);
                 }
 
@@ -197,7 +190,6 @@ class WebhookService
             // Store payment log
             try {
                 $this->storePaymentLog($gateway, $sessionId, $params);
-                Log::info("[$gateway] Payment log stored successfully for session: $sessionId");
             } catch (\Exception $e) {
                 Log::error("[$gateway] Failed to store payment log: " . $e->getMessage());
                 return response()->json(['error' => 'Failed to store payment log'], 500);
@@ -208,27 +200,7 @@ class WebhookService
                 Log::warning("[$gateway] Duplicate webhook received for session_id: $sessionId and payment_id: $paymentId");
                 return response()->json(['message' => 'Webhook already processed'], 200);
             }
-
-            // Trigger appropriate handler
-            if ($category === 'Amusement') {
-                Log::info("[$gateway] Processing amusement booking transfer - Session: $sessionId, Status: $status, Payment: $paymentId");
-                $result = $this->transferAmusementBooking($sessionId, $status, $paymentId);
-
-                if ($result === false) {
-                    Log::error("[$gateway] Amusement booking transfer failed for session: $sessionId");
-                    return response()->json(['error' => 'Amusement booking transfer failed'], 500);
-                }
-
-                Log::info("[$gateway] Amusement booking transfer completed successfully for session: $sessionId");
-                return response()->json([
-                    'message' => 'Amusement webhook processed successfully',
-                    'session_id' => $sessionId,
-                    'status' => $status
-                ], 200);
-            } else {
-                Log::info("[$gateway] Processing event booking transfer - Session: $sessionId, Status: $status, Payment: $paymentId");
-                return $this->transferEventBooking($sessionId, $status, $paymentId);
-            }
+            return $this->transferEventBooking($sessionId, $status, $paymentId);
         } catch (\Exception $e) {
             Log::error("[$gateway] Webhook processing failed: " . $e->getMessage(), [
                 'exception' => $e,
@@ -272,14 +244,11 @@ class WebhookService
                 Log::warning("[extractSessionData] No session_id found in URL: $url");
             }
 
-            $result = [
+            return [
                 'session_id' => $sessionId,
                 'category' => $category,
                 'last_segment' => $lastSegment,
             ];
-
-            Log::info("[extractSessionData] Extracted data", $result);
-            return $result;
         } catch (\Exception $e) {
             Log::error("[extractSessionData] Exception: " . $e->getMessage());
             return null;
@@ -295,26 +264,8 @@ class WebhookService
             ->exists();
 
         if ($existingBooking) {
-            Log::info("[checkExistingBooking] Found existing booking regarding to these data", [
-                'session_id' => $sessionId,
-                'payment_id' => $paymentId
-            ]);
             return true;
         }
-
-        // Check in amusement bookings
-        $existingAmusementBooking = AmusementBooking::where('session_id', $sessionId)
-            ->where('payment_id', $paymentId)
-            ->exists();
-
-        if ($existingAmusementBooking) {
-            Log::info("[checkExistingBooking] Found existing booking in AmusementBooking table", [
-                'session_id' => $sessionId,
-                'payment_id' => $paymentId
-            ]);
-            return true;
-        }
-
         return false;
     }
 
@@ -361,22 +312,13 @@ class WebhookService
             $paymentMode = $paymentDetails['paymentMode'] ?? 'phonepe';
 
             // Extract UTR if available
-            $utr = null;
-            if (isset($paymentDetails['rail']['utr'])) {
-                $utr = $paymentDetails['rail']['utr'];
-            }
+            $utr = $paymentDetails['rail']['utr'] ?? null;
 
             // For PhonePe, we need to extract session ID from merchantOrderId
             $sessionId = $this->extractSessionFromMerchantOrderId($merchantOrderId);
 
             // Determine category
             $category = $this->determineCategoryFromMerchantOrderId($merchantOrderId);
-
-            Log::info('[PhonePe] Extracted webhook data', [
-                'session_id' => $sessionId,
-                'category' => $category,
-                'status' => $status
-            ]);
 
             return [
                 'payment_id' => $transactionId,
@@ -426,12 +368,6 @@ class WebhookService
 
             $category = optional($pending->ticket?->event?->Category)->title ?? 'Event';
 
-            Log::info('[Cashfree] Extracted webhook data', [
-                'session_id' => $sessionId,
-                'category' => $category,
-                'status' => $status
-            ]);
-
             return [
                 'payment_id' => $paymentId,
                 'session_id' => $sessionId,
@@ -453,25 +389,12 @@ class WebhookService
     // Helper method to extract session ID from merchant order ID
     private function extractSessionFromMerchantOrderId($merchantOrderId)
     {
-        // Option 1: If you store it in pending bookings
+        // Check in regular bookings
         $pendingBooking = PenddingBooking::where('txnid', $merchantOrderId)->first();
         if ($pendingBooking) {
-            Log::info('[extractSessionFromMerchantOrderId] Found in PenddingBooking', [
-                'session_id' => $pendingBooking->session_id
-            ]);
             return $pendingBooking->session_id;
         }
 
-        // Option 2: If you store it in amusement pending bookings
-        $amusementPendingBooking = AmusementPendingBooking::where('txnid', $merchantOrderId)->first();
-        if ($amusementPendingBooking) {
-            Log::info('[extractSessionFromMerchantOrderId] Found in AmusementPendingBooking', [
-                'session_id' => $amusementPendingBooking->session_id
-            ]);
-            return $amusementPendingBooking->session_id;
-        }
-
-        Log::warning("Could not find session_id for merchant order ID: " . $merchantOrderId);
         return null;
     }
 
@@ -540,12 +463,6 @@ class WebhookService
             // ✅ Booking status
             $bookingStatus = ($status === 'captured') ? 'success' : 'failed';
 
-            Log::info('[Razorpay] Extracted webhook data', [
-                'session_id' => $sessionId,
-                'category' => $category,
-                'status' => $bookingStatus
-            ]);
-
             return [
                 'payment_id' => $paymentId,
                 'session_id' => $sessionId,
@@ -582,17 +499,11 @@ class WebhookService
                 $sessionId = end($pathSegments);
 
                 if (!empty($sessionId)) {
-                    Log::info('[extractSessionFromCallbackUrl] Extracted session_id', [
-                        'session_id' => $sessionId
-                    ]);
                     return $sessionId;
                 }
             }
-
-            Log::warning("Could not extract session_id from callback URL: " . $callbackUrl);
             return null;
         } catch (\Exception $e) {
-            Log::error('Failed to extract session ID from callback URL: ' . $e->getMessage());
             return null;
         }
     }
@@ -616,43 +527,23 @@ class WebhookService
             // URL decode the category
             $category = urldecode($category);
 
-            // Map category names if needed
-            if (stripos($category, 'amusement') !== false) {
-                return 'Amusement';
-            } elseif (stripos($category, 'business') !== false || stripos($category, 'conference') !== false) {
-                return 'Event';
-            }
-
-            Log::info('[extractCategoryFromCallbackUrl] Extracted category', [
-                'category' => $category
-            ]);
-
             return $category ?: 'Event';
         } catch (\Exception $e) {
-            Log::error('Failed to extract category from callback URL: ' . $e->getMessage());
             return 'Event';
         }
     }
 
+    // Helper method to determine category from merchant order ID
     // Helper method to determine category from merchant order ID
     private function determineCategoryFromMerchantOrderId($merchantOrderId)
     {
         // Check in pending bookings first
         $pendingBooking = PenddingBooking::where('txnid', $merchantOrderId)->first();
         if ($pendingBooking) {
-            Log::info('[determineCategoryFromMerchantOrderId] Category: Event (from PenddingBooking)');
             return 'Event';
         }
 
-        // Check in amusement pending bookings
-        $amusementPendingBooking = AmusementPendingBooking::where('txnid', $merchantOrderId)->first();
-        if ($amusementPendingBooking) {
-            Log::info('[determineCategoryFromMerchantOrderId] Category: Amusement (from AmusementPendingBooking)');
-            return 'Amusement';
-        }
-
         // Default fallback
-        Log::info('[determineCategoryFromMerchantOrderId] Category: Event (default)');
         return 'Event';
     }
 
@@ -721,9 +612,6 @@ class WebhookService
                 throw new \Exception("Unsupported payment gateway: " . $gateway);
             }
 
-            // Log payment data
-            Log::info('Payment Log: ' . ucfirst($gateway), ['data' => $paymentData]);
-
             // Update pending bookings
             if ($sessionId || isset($params['easepayid']) || isset($params['payment_id'])) {
                 $updateData = [
@@ -732,10 +620,6 @@ class WebhookService
                     'payment_method' => $paymentData['mode'] ?? $gateway
                 ];
                 $updated = PenddingBooking::where('session_id', $sessionId)->update($updateData);
-                Log::info('[storePaymentLog] Updated PenddingBooking records', [
-                    'session_id' => $sessionId,
-                    'rows_updated' => $updated
-                ]);
             }
 
             // Insert or update PaymentLog
@@ -743,10 +627,8 @@ class WebhookService
             if ($existing) {
                 $existing->update($paymentData);
                 $result = $existing->fresh();
-                Log::info('[storePaymentLog] Updated existing PaymentLog', ['id' => $result->id]);
             } else {
                 $result = PaymentLog::create($paymentData);
-                Log::info('[storePaymentLog] Created new PaymentLog', ['id' => $result->id]);
             }
 
             return [$existing, $result];
@@ -758,200 +640,9 @@ class WebhookService
         }
     }
 
-    private function transferAmusementBooking($decryptedSessionId, $status, $paymentId)
-    {
-        try {
-            Log::info('[transferAmusementBooking] Starting transfer', [
-                'session_id' => $decryptedSessionId,
-                'status' => $status,
-                'payment_id' => $paymentId
-            ]);
-
-            $bookingMaster = AmusementPendingMasterBooking::where('session_id', $decryptedSessionId)
-                ->with('ticket.event')
-                ->get();
-
-            $bookings = AmusementPendingBooking::where('session_id', $decryptedSessionId)
-                ->with('ticket.event')
-                ->get();
-
-            if ($bookings->isEmpty()) {
-                Log::error('[transferAmusementBooking] No pending bookings found', [
-                    'session_id' => $decryptedSessionId
-                ]);
-                return false;
-            }
-
-            Log::info('[transferAmusementBooking] Found pending bookings', [
-                'count' => $bookings->count()
-            ]);
-
-            $totalQty = $bookings->count();
-
-            if ($totalQty > 1 && $bookingMaster->isNotEmpty()) {
-                $orderId = $bookingMaster->first()->order_id ?? '';
-            } else {
-                $orderId = $bookings[0]->token ?? '';
-            }
-
-            $shortLink = $orderId;
-            $shortLinksms = "t.getyourticket.in/t/{$orderId}";
-            $whatsappTemplate = WhatsappApi::where('title', 'Online Booking')->first();
-            $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-            $dates = explode(',', $bookings[0]->ticket->event->date_range);
-            $formattedDates = [];
-            foreach ($dates as $date) {
-                $formattedDates[] = \Carbon\Carbon::parse($date)->format('d-m-Y');
-            }
-            $dateRangeFormatted = implode(' | ', $formattedDates);
-
-            $eventDateTime = $dateRangeFormatted . ' | ' . $bookings[0]->ticket->event->start_time . ' - ' . $bookings[0]->ticket->event->end_time;
-
-            $totalQty = count($bookings) ?? 1;
-            $mediaurl = $bookings[0]->ticket->event->eventMedia->thumbnail;
-            $data = (object) [
-                'name' => $bookings[0]->name,
-                'number' => $bookings[0]->number,
-                'templateName' => 'Online Booking Template',
-                'whatsappTemplateData' => $whatsappTemplateName,
-                'mediaurl' => $mediaurl,
-                'shortLink' => $shortLink,
-                'insta_whts_url' => $bookings[0]->ticket->event->insta_whts_url ?? 'helloinsta',
-                'values' => [
-                    $bookings[0]->name,
-                    $bookings[0]->number,
-                    $bookings[0]->ticket->event->name,
-                    $totalQty,
-                    $bookings[0]->ticket->name,
-                    $bookings[0]->ticket->event->venue->address,
-                    $eventDateTime,
-                    $bookings[0]->ticket->event->whts_note ?? 'hello',
-                ],
-                'replacements' => [
-                    ':C_Name' => $bookings[0]->name,
-                    ':T_QTY' => $totalQty,
-                    ':Ticket_Name' => $bookings[0]->ticket->name,
-                    ':Event_Name' => $bookings[0]->ticket->event->name,
-                    ':Event_Date' => $eventDateTime,
-                    ':S_Link' => $shortLinksms,
-                ]
-            ];
-
-            $masterBookingIDs = [];
-
-            if ($bookings->isNotEmpty()) {
-                foreach ($bookings as $individualBooking) {
-                    if ($status === 'success') {
-                        $oldPendingBookingId = $individualBooking->id; // ✅ Store old ID
-
-                        $booking = $this->amusementBookingData($individualBooking, $paymentId);
-
-                        if ($booking) {
-                            $masterBookingIDs[] = $booking->id;
-
-                            // ✅ UPDATE BOOKING TAX for amusement bookings
-                            $taxUpdated = BookingTax::where('booking_id', $oldPendingBookingId)
-                                ->where('type', 'online')
-                                ->update(['booking_id' => $booking->id]);
-
-                            if ($taxUpdated) {
-                                Log::info('[transferAmusementBooking] BookingTax updated successfully', [
-                                    'old_booking_id' => $oldPendingBookingId,
-                                    'new_booking_id' => $booking->id,
-                                    'rows_updated' => $taxUpdated
-                                ]);
-                            } else {
-                                Log::warning('[transferAmusementBooking] No BookingTax found to update', [
-                                    'old_booking_id' => $oldPendingBookingId
-                                ]);
-                            }
-
-                            $individualBooking->delete();
-
-                            Log::info('[transferAmusementBooking] Booking transferred successfully', [
-                                'booking_id' => $booking->id
-                            ]);
-                        } else {
-                            Log::error('[transferAmusementBooking] Failed to create booking');
-                            return false;
-                        }
-                    } elseif ($status === 'failure' || $status === 'failed') {
-                        $individualBooking->payment_status = 2;
-                        $individualBooking->payment_id = $paymentId;
-                        Log::info('[transferAmusementBooking] Marking booking as failed', [
-                            'pending_booking_id' => $individualBooking->id
-                        ]);
-                    } else {
-                        $individualBooking->payment_status = $status;
-                    }
-                    $individualBooking->save();
-                }
-            }
-
-            // ✅ UPDATE AMUSEMENT MASTER BOOKING TAX
-            if ($bookingMaster->isNotEmpty() && $status === 'success') {
-                $oldPendingMasterId = $bookingMaster->first()->id; // ✅ Store old master ID
-
-                $newMaster = $this->updateAmusementMasterBooking($bookingMaster, $masterBookingIDs, $paymentId);
-
-                if ($newMaster) {
-                    // ✅ UPDATE MASTER BOOKING TAX
-                    $masterTaxUpdated = BookingTax::where('booking_id', $oldPendingMasterId)
-                        ->where('type', 'online_master')
-                        ->update(['booking_id' => $newMaster->id]);
-
-                    if ($masterTaxUpdated) {
-                        Log::info('[transferAmusementBooking] Master BookingTax updated successfully', [
-                            'old_master_id' => $oldPendingMasterId,
-                            'new_master_id' => $newMaster->id,
-                            'rows_updated' => $masterTaxUpdated
-                        ]);
-                    } else {
-                        Log::warning('[transferAmusementBooking] No Master BookingTax found to update', [
-                            'old_master_id' => $oldPendingMasterId
-                        ]);
-                    }
-
-                    $bookingMaster->each->delete();
-                    Log::info('[transferAmusementBooking] Master booking updated and pending master deleted');
-                } else {
-                    Log::error('[transferAmusementBooking] Failed to update master booking');
-                    return false;
-                }
-            }
-
-            // Send SMS & WhatsApp
-            if ($status === 'success') {
-                try {
-                    $this->smsService->send($data);
-                    $this->whatsappService->send($data);
-                    Log::info('[transferAmusementBooking] Notifications sent successfully');
-                } catch (\Exception $e) {
-                    Log::error('[transferAmusementBooking] Failed to send notifications: ' . $e->getMessage());
-                }
-            }
-
-            Log::info('[transferAmusementBooking] Transfer completed successfully');
-            return true;
-        } catch (\Exception $e) {
-            Log::error('[transferAmusementBooking] Exception occurred: ' . $e->getMessage(), [
-                'session_id' => $decryptedSessionId,
-                'trace' => $e->getTraceAsString()
-            ]);
-            return false;
-        }
-    }
-
     private function transferEventBooking($decryptedSessionId, $status, $paymentId)
     {
         try {
-            Log::info('[transferEventBooking] Starting transfer', [
-                'session_id' => $decryptedSessionId,
-                'status' => $status,
-                'payment_id' => $paymentId
-            ]);
-
             $bookingMaster = PenddingBookingsMaster::where('session_id', $decryptedSessionId)
                 ->with('ticket.event')
                 ->get();
@@ -969,63 +660,6 @@ class WebhookService
                     'session_id' => $decryptedSessionId
                 ], 404);
             }
-
-            Log::info('[transferEventBooking] Found pending bookings', [
-                'count' => $bookings->count()
-            ]);
-
-            $totalQty = $bookings->count();
-
-            if ($totalQty > 1 && $bookingMaster->isNotEmpty()) {
-                $orderId = $bookingMaster->first()->order_id ?? '';
-            } else {
-                $orderId = $bookings[0]->token ?? '';
-            }
-
-            $shortLink = $orderId;
-            $shortLinksms = "t.getyourticket.in/t/{$orderId}";
-            $whatsappTemplate = WhatsappApi::where('title', 'Online Booking')->first();
-            $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-            $dates = explode(',', $bookings[0]->ticket->event->date_range);
-            $formattedDates = [];
-            foreach ($dates as $date) {
-                $formattedDates[] = \Carbon\Carbon::parse($date)->format('d-m-Y');
-            }
-            $dateRangeFormatted = implode(' | ', $formattedDates);
-
-            $eventDateTime = $dateRangeFormatted . ' | ' . $bookings[0]->ticket->event->start_time . ' - ' . $bookings[0]->ticket->event->end_time;
-
-            $totalQty = count($bookings) ?? 1;
-            $mediaurl = $bookings[0]->ticket->event->thumbnail;
-            $data = (object) [
-                'name' => $bookings[0]->name,
-                'number' => $bookings[0]->number,
-                'templateName' => 'Online Booking Template',
-                'whatsappTemplateData' => $whatsappTemplateName,
-                'mediaurl' => $mediaurl,
-                'shortLink' => $shortLink,
-                'insta_whts_url' => $bookings[0]->ticket->event->insta_whts_url ?? 'helloinsta',
-                'values' => [
-                    $bookings[0]->name,
-                    $bookings[0]->number,
-                    $bookings[0]->ticket->event->name,
-                    $totalQty,
-                    $bookings[0]->ticket->name,
-                    $bookings[0]->ticket->event->address,
-                    $eventDateTime,
-                    $bookings[0]->ticket->event->whts_note ?? 'hello',
-                ],
-                'replacements' => [
-                    ':C_Name' => $bookings[0]->name,
-                    ':T_QTY' => $totalQty,
-                    ':Ticket_Name' => $bookings[0]->ticket->name,
-                    ':Event_Name' => $bookings[0]->ticket->event->name,
-                    ':Event_Date' => $eventDateTime,
-                    ':S_Link' => $shortLinksms,
-                ]
-            ];
-
             $masterBookingIDs = [];
 
             if ($bookings->isNotEmpty()) {
@@ -1044,24 +678,7 @@ class WebhookService
                                     ->where('type', 'online')
                                     ->update(['booking_id' => $booking->id]);
 
-                                if ($taxUpdated) {
-                                    Log::info('[transferEventBooking] BookingTax updated successfully', [
-                                        'old_booking_id' => $oldPendingBookingId,
-                                        'new_booking_id' => $booking->id,
-                                        'rows_updated' => $taxUpdated
-                                    ]);
-                                } else {
-                                    Log::warning('[transferEventBooking] No BookingTax found to update', [
-                                        'old_booking_id' => $oldPendingBookingId
-                                    ]);
-                                }
-
                                 $individualBooking->delete();
-
-                                Log::info('[transferEventBooking] Booking transferred successfully', [
-                                    'booking_id' => $booking->id,
-                                    'pending_booking_id' => $oldPendingBookingId,
-                                ]);
                             } else {
                                 $errorMessage = 'Booking creation failed: bookingData() returned null';
                                 Log::error('[transferEventBooking] ' . $errorMessage, [
@@ -1077,10 +694,6 @@ class WebhookService
                         } elseif (in_array($status, ['failure', 'failed'])) {
                             $individualBooking->payment_status = 2;
                             $individualBooking->payment_id = $paymentId;
-
-                            Log::info('[transferEventBooking] Marking booking as failed', [
-                                'pending_booking_id' => $individualBooking->id
-                            ]);
                         } else {
                             $individualBooking->payment_status = $status;
                         }
@@ -1122,38 +735,23 @@ class WebhookService
                         ->where('type', 'online_master')
                         ->update(['booking_id' => $newMaster->id]);
 
-                    if ($masterTaxUpdated) {
-                        Log::info('[transferEventBooking] Master BookingTax updated successfully', [
-                            'old_master_id' => $oldPendingMasterId,
-                            'new_master_id' => $newMaster->id,
-                            'rows_updated' => $masterTaxUpdated
-                        ]);
-                    } else {
-                        Log::warning('[transferEventBooking] No Master BookingTax found to update', [
-                            'old_master_id' => $oldPendingMasterId
-                        ]);
-                    }
-
                     $bookingMaster->each->delete();
-                    Log::info('[transferEventBooking] Master booking updated and pending master deleted');
                 } else {
                     Log::error('[transferEventBooking] Failed to update master booking');
                     return response()->json(['error' => 'Failed to update master booking'], 500);
                 }
             }
 
-            // Send SMS & WhatsApp
-            if ($status === 'success') {
+            // Dispatch SendBookingAlertJob for SMS/WhatsApp notifications
+            if ($status === 'success' && !empty($masterBookingIDs)) {
                 try {
-                    $this->smsService->send($data);
-                    $this->whatsappService->send($data);
-                    Log::info('[transferEventBooking] Notifications sent successfully');
+                    // Job will handle SMS + WhatsApp with proper template replacements
+                    SendBookingAlertJob::dispatch($masterBookingIDs, 'online');
                 } catch (\Exception $e) {
-                    Log::error('[transferEventBooking] Failed to send notifications: ' . $e->getMessage());
+                    Log::error('[transferEventBooking] Failed to dispatch notification job: ' . $e->getMessage());
                 }
             }
 
-            Log::info('[transferEventBooking] Transfer completed successfully');
             return response()->json([
                 'message' => 'Event booking processed successfully',
                 'session_id' => $decryptedSessionId,
@@ -1227,15 +825,7 @@ class WebhookService
                 }
 
                 $promocode->save();
-                Log::info('[bookingData] Promocode applied', [
-                    'code' => $promocode->code,
-                    'remaining' => $promocode->remaining_count
-                ]);
             }
-
-            Log::info('[bookingData] Booking created successfully', [
-                'booking_id' => $booking->id
-            ]);
 
             return $booking;
         } catch (\Exception $e) {
@@ -1276,10 +866,6 @@ class WebhookService
                 }
 
                 $createdMaster = $master; // ✅ Store reference
-
-                Log::info('[updateMasterBooking] Master booking created', [
-                    'master_id' => $master->id
-                ]);
             }
 
             return $createdMaster; // ✅ Return the master booking object
@@ -1290,128 +876,6 @@ class WebhookService
             return false;
         }
     }
-
-
-
-
-
-    private function amusementBookingData($data, $paymentId)
-    {
-        try {
-            $booking = new AmusementBooking();
-            $booking->ticket_id = $data->ticket_id;
-            $booking->user_id = $data->user_id;
-            $booking->gateway = $data->gateway;
-            $booking->session_id = $data->session_id;
-            $booking->promocode_id = $data->promocode_id;
-            $booking->token = $data->token;
-            $booking->payment_id = $paymentId ?? NULL;
-            $booking->amount = $data->amount ?? 0;
-            $booking->email = $data->email;
-            $booking->name = $data->name;
-            $booking->number = $data->number;
-            $booking->type = $data->type;
-            $booking->dates = $data->dates;
-            $booking->payment_method = $data->payment_method;
-            $booking->discount = $data->discount;
-            $booking->status = $data->status = 0;
-            $booking->payment_status = 1;
-            $booking->txnid = $data->txnid;
-            $booking->device = $data->device;
-            $booking->booking_date = $data->booking_date;
-            $booking->save();
-
-            if (isset($booking->promocode_id)) {
-                $promocode = Promocode::where('code', $booking->promocode_id)->first();
-
-                if (!$promocode) {
-                    Log::error('[amusementBookingData] Invalid promocode', [
-                        'code' => $booking->promocode_id
-                    ]);
-                    return response()->json(['status' => false, 'message' => 'Invalid promocode'], 400);
-                }
-
-                if ($promocode->remaining_count === null) {
-                    $promocode->remaining_count = $promocode->usage_limit - 1;
-                } elseif ($promocode->remaining_count > 0) {
-                    $promocode->remaining_count--;
-                } else {
-                    Log::error('[amusementBookingData] Promocode usage limit reached', [
-                        'code' => $booking->promocode_id
-                    ]);
-                    return response()->json(['status' => false, 'message' => 'Promocode usage limit reached'], 400);
-                }
-
-                $promocode->save();
-                Log::info('[amusementBookingData] Promocode applied', [
-                    'code' => $promocode->code,
-                    'remaining' => $promocode->remaining_count
-                ]);
-            }
-
-            Log::info('[amusementBookingData] Booking created successfully', [
-                'booking_id' => $booking->id
-            ]);
-
-            return $booking;
-        } catch (\Exception $e) {
-            Log::error('[amusementBookingData] Failed to create booking: ' . $e->getMessage(), [
-                'trace' => $e->getTraceAsString()
-            ]);
-            return null;
-        }
-    }
-
-    private function updateAmusementMasterBooking($bookingMaster, $ids, $paymentId)
-    {
-        try {
-            foreach ($bookingMaster as $entry) {
-                if (!$entry) {
-                    continue;
-                }
-
-                $data = [
-                    'user_id' => $entry->user_id,
-                    'gateway' => $entry->gateway,
-                    'session_id' => $entry->session_id,
-                    'booking_id' => is_array($ids) ? json_encode($ids) : json_encode([$ids]),
-                    'order_id' => $entry->order_id,
-                    'amount' => $entry->amount,
-                    'discount' => $entry->discount,
-                    'payment_method' => $entry->payment_method,
-                    'payment_id' => $paymentId,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ];
-
-                $master = AmusementMasterBooking::create($data);
-
-                if (!$master) {
-                    Log::error('[updateAmusementMasterBooking] Failed to create master booking');
-                    return false;
-                }
-
-                Log::info('[updateAmusementMasterBooking] Master booking created', [
-                    'master_id' => $master->id
-                ]);
-            }
-
-            return true;
-        } catch (\Exception $e) {
-            Log::error('[updateAmusementMasterBooking] Exception: ' . $e->getMessage(), [
-                'trace' => $e->getTraceAsString()
-            ]);
-            return false;
-        }
-    }
-
-
-
-
-
-    // NOTE: The remaining methods (handleZeroAmountBooking, store, storeEmusment, etc.) 
-    // are kept as-is from the original file for completeness.
-    // Add similar logging improvements to these methods if needed.
 
     public function handleZeroAmountBooking($request, $session, $txnid, $setId)
     {
@@ -1450,14 +914,10 @@ class WebhookService
         for ($i = 0; $i < $request->quantity; $i++) {
             $attendeeId = $savedAttendees[$i]->id ?? ($attendees[$i]['id'] ?? null);
 
-            if ($request->category === 'Amusement') {
-                $booking = $this->amusementBookingDataZero($request, $session, $txnid, $setId, $i);
-            } else {
-                $booking = $this->bookingDataZero($request, $session, $txnid, $setId, [
-                    'is_master_booking' => false,
-                    'attendee_id' => $attendeeId
-                ]);
-            }
+            $booking = $this->bookingDataZero($request, $session, $txnid, $setId, [
+                'is_master_booking' => false,
+                'attendee_id' => $attendeeId
+            ]);
 
             if (!$booking) {
                 return response()->json(['status' => false, 'message' => 'Booking failed'], 400);
@@ -1469,205 +929,36 @@ class WebhookService
 
         // ✅ Step 3: If multiple bookings → create master booking
         if (count($bookingIds) > 1) {
-            $masterData = ($request->category === 'Amusement')
-                ? $this->updateAmusementMasterBookingZero($bookings[0], $bookingIds)
-                : $this->updateMasterBookingZero($bookings[0], $bookingIds);
+            $masterData = $this->updateMasterBookingZero($bookings[0], $bookingIds);
+
+            // Dispatch SendBookingAlertJob with all booking IDs (same as ResendTicketController)
+            SendBookingAlertJob::dispatch($bookingIds, 'online');
 
             return response()->json([
                 'status' => true,
                 'bookings' => $masterData ?? $bookings,
                 'is_master' => true,
-                'message' => 'Master booking created successfully',
+                //'message' => 'Master booking created successfully',
                 'attendees' => $savedAttendees,
                 'gateway_status' => 'success'
             ], 200);
         }
 
         // ✅ Step 4: Only single booking (if quantity = 1)
+        // Dispatch SendBookingAlertJob for single booking
+        if (!empty($bookingIds[0])) {
+            SendBookingAlertJob::dispatch([$bookingIds[0]], 'online');
+        }
+
         return response()->json([
             'status' => true,
             'bookings' => $bookings,
             'is_master' => false,
-            'message' => 'Single booking created successfully',
+            //'message' => 'Single booking created successfully',
             'attendees' => $savedAttendees,
             'gateway_status' => 'success'
         ], 200);
     }
-
-
-    private function updateAmusementMasterBookingZero($booking, $ids)
-    {
-        $data = [
-            'user_id' => $booking->user_id,
-            'session_id' => $booking->session_id,
-            'booking_id' => is_array($ids) ? json_encode($ids) : json_encode([$ids]),
-            'order_id' => $booking->order_id,
-            'amount' => $booking->amount ?? 0,
-            'discount' => $booking->discount,
-            'payment_method' => $booking->payment_method,
-            'created_at' => now(),
-            'updated_at' => now(),
-        ];
-
-        $master = AmusementMasterBooking::create($data);
-
-        if (!$master) {
-            return false;
-        }
-        $master->bookings = AmusementBooking::whereIn('id', $ids)->with(['user', 'attendee', 'ticket.event'])->get();
-
-
-        $orderId = $booking->order_id ?? '';
-        $shortLink = $orderId;
-        $shortLinksms = "t.getyourticket.in/t/{$orderId}";
-
-        $whatsappTemplate = WhatsappApi::where('title', 'Online Booking')->first();
-        $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-        $dates = explode(',', $booking->ticket->event->date_range);
-        $formattedDates = [];
-        foreach ($dates as $date) {
-            $formattedDates[] = \Carbon\Carbon::parse($date)->format('d-m-Y');
-        }
-        $dateRangeFormatted = implode(' | ', $formattedDates);
-
-        $eventDateTime = $dateRangeFormatted . ' | ' . $booking->ticket->event->start_time . ' - ' . $booking->ticket->event->end_time;
-
-        $totalQty = count($ids);
-        $mediaurl = $booking->ticket->event->eventMedia->thumbnail;
-        $data = (object) [
-            'name' => $booking->name,
-            'number' => $booking->number,
-            'templateName' => 'Online Booking Template',
-            'whatsappTemplateData' => $whatsappTemplateName,
-            'mediaurl' => $mediaurl,
-            'shortLink' => $shortLink,
-            'insta_whts_url' => $booking->ticket->event->insta_whts_url ?? 'helloinsta',
-            'values' => [
-                $booking->name,
-                $booking->number,
-                $booking->ticket->event->name,
-                $totalQty,
-                $booking->ticket->name,
-                $booking->ticket->event->venue->address,
-                $eventDateTime,
-                $booking->ticket->event->whts_note ?? 'hello',
-            ],
-            'replacements' => [
-                ':C_Name' => $booking->name,
-                ':T_QTY' => $totalQty,
-                ':Ticket_Name' => $booking->ticket->name,
-                ':Event_Name' => $booking->ticket->event->name,
-                ':Event_Date' => $eventDateTime,
-                ':S_Link' => $shortLinksms,
-            ]
-        ];
-
-        if ($totalQty >= 2) {
-            $this->smsService->send($data);
-            $this->whatsappService->send($data);
-        }
-
-        return $master;
-    }
-
-    // private function updateMasterBookingZero($booking, $ids)
-    // {
-    //     $data = [
-    //         'user_id' => $booking['user_id'],
-    //         'session_id' => $booking['session_id'],
-    //         'set_id' => $booking['set_id'],
-    //         'booking_type' => $booking['booking_type'],
-    //         'booking_id' => implode(',', $ids),
-    //         'order_id' => $this->generateHexadecimalCode(),
-    //         'total_amount' => $booking['totalFinalAmount'] ?? 0,
-    //         'discount' => $booking['discount'] ?? 0,
-    //         'payment_method' => $booking['payment_method'] ?? 'online',
-    //         'created_at' => now(),
-    //         'updated_at' => now(),
-    //     ];
-
-    //     $master = MasterBooking::create($data);
-
-    //     if (!$master) {
-    //         return false;
-    //     }
-
-    //     $singleBookings = Booking::whereIn('id', $ids)->get();
-
-    //     foreach ($singleBookings as $single) {
-    //         $single->master_token = $master->order_id;
-    //         $single->save();
-    //     }
-    //     if (isset($booking->ticket_id)) {
-    //         $ticket = Ticket::find($booking->ticket_id);
-    //         if ($ticket) {
-    //             $totalQty = count($ids); // since all are part of same master booking
-    //             $newRemaining = $ticket->remaining_count ?? $ticket->ticket_quantity;
-    //             $newRemaining = max(0, $newRemaining - $totalQty);
-    //             $ticket->remaining_count = $newRemaining;
-    //             $ticket->sold_out = $newRemaining <= 0 ? 1 : 0;
-    //             $ticket->save();
-    //         }
-    //     }
-
-    //     $master->bookings = Booking::whereIn('id', $ids)
-    //         ->with(['user', 'ticket.event', 'attendee'])
-    //         ->get();
-
-    //     $orderId = $master->order_id ?? '';
-    //     $shortLink = $orderId;
-    //     $shortLinksms = "t.getyourticket.in/t/{$orderId}";
-
-    //     $whatsappTemplate = WhatsappApi::where('title', 'Online Booking')->first();
-    //     $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-    //     $dates = explode(',', $booking->ticket->event->date_range);
-    //     $formattedDates = [];
-    //     foreach ($dates as $date) {
-    //         $formattedDates[] = \Carbon\Carbon::parse($date)->format('d-m-Y');
-    //     }
-    //     $dateRangeFormatted = implode(' | ', $formattedDates);
-
-    //     $eventDateTime = $dateRangeFormatted . ' | ' . $booking->ticket->event->start_time . ' - ' . $booking->ticket->event->end_time;
-    //     $totalQty = count($ids);
-    //     $mediaurl = $booking->ticket->event->eventMedia->thumbnail ?? '';
-
-    //     $notifyData = (object) [
-    //         'name' => $booking->name,
-    //         'number' => $booking->number,
-    //         'templateName' => 'Online Booking Template',
-    //         'whatsappTemplateData' => $whatsappTemplateName,
-    //         'mediaurl' => $mediaurl,
-    //         'shortLink' => $shortLink,
-    //         'insta_whts_url' => $booking->ticket->event->insta_whts_url ?? 'helloinsta',
-    //         'values' => [
-    //             $booking->name,
-    //             $booking->number,
-    //             $booking->ticket->event->name,
-    //             $totalQty,
-    //             $booking->ticket->name,
-    //             $booking->ticket->event->venue->address,
-    //             $eventDateTime,
-    //             $booking->ticket->event->whts_note ?? 'hello',
-    //         ],
-    //         'replacements' => [
-    //             ':C_Name' => $booking->name,
-    //             ':T_QTY' => $totalQty,
-    //             ':Ticket_Name' => $booking->ticket->name,
-    //             ':Event_Name' => $booking->ticket->event->name,
-    //             ':Event_Date' => $eventDateTime,
-    //             ':S_Link' => $shortLinksms,
-    //         ]
-    //     ];
-
-    //     if ($totalQty >= 2) {
-    //         $this->smsService->send($notifyData);
-    //         $this->whatsappService->send($notifyData);
-    //     }
-
-    //     return $master->load(['bookings.ticket.event', 'bookings.attendee', 'bookings.user']);
-    // }
 
     private function updateMasterBookingZero($booking, $ids)
     {
@@ -1725,12 +1016,6 @@ class WebhookService
                         // update booking ess_id
                         $single->ess_id = $ess->id;
                         $single->save();
-
-                        Log::info('[MASTER_BOOKING][ESS] ESS UPDATED', [
-                            'booking_id' => $single->id,
-                            'seat_id' => $single->seat_id,
-                            'ess_id' => $ess->id
-                        ]);
                     } catch (\Exception $ex) {
                         Log::error('[MASTER_BOOKING][ESS_ERROR]', [
                             'booking_id' => $single->id,
@@ -1770,114 +1055,6 @@ class WebhookService
     }
 
 
-    private function amusementBookingDataZero($request, $session, $txnid, $i)
-    {
-        $attendees = $request->attendees ?? [];
-        $attendeeId = $attendees[$i]['id'] ?? null;
-
-        $booking = new AmusementBooking();
-        $booking->ticket_id = $request->ticket_id;
-        $booking->user_id = $request->user_id;
-        $booking->session_id = $request->session_id ?? $session;
-        $booking->promocode_id = $request->promocode_id ?? NULL;
-        $booking->token = $request->token ?? $this->generateHexadecimalCode();
-        $booking->amount = $request->amount ?? 0;
-        $booking->email = $request->user_email;
-        $booking->name = $request->user_name;
-        $booking->number = $request->user_phone;
-        $booking->type = $request->type;
-        $booking->dates = $request->dates ?? now();
-        $booking->payment_method = $request->payment_method;
-        $booking->discount = $request->discount ?? NULL;
-        $booking->status = $request->status = 0;
-        $booking->payment_status = 1;
-        $booking->txnid = $request->txnid ?? $txnid;
-        $booking->device = $request->device ?? NULL;
-        $booking->base_amount = $request->base_amount;
-        $booking->convenience_fee = $request->convenience_fee ?? NULL;
-        $booking->attendee_id = $attendeeId;
-        $booking->total_tax = $request->total_tax ?? NULL;
-        $booking->booking_date = $request->booking_date;
-        $booking->save();
-        $booking->load(['user', 'ticket.event', 'attendee']);
-
-        if (isset($booking->promocode_id)) {
-            $promocode = Promocode::where('code', $booking->promocode_id)->first();
-
-            if (!$promocode) {
-                return response()->json(['status' => false, 'message' => 'Invalid promocode'], 400);
-            }
-
-            if ($promocode->remaining_count === null) {
-                $promocode->remaining_count = $promocode->usage_limit - 1;
-            } elseif ($promocode->remaining_count > null) {
-                $promocode->remaining_count--;
-            } else {
-                return response()->json(['status' => false, 'message' => 'Promocode usage limit reached'], 400);
-            }
-
-            if (isset($booking->promocode_id)) {
-                $booking->promocode_id = $booking->promocode_id;
-            }
-
-            $promocode->save();
-        }
-
-        $orderId = $booking->token ?? '';
-        $shortLink = $orderId;
-        $shortLinksms = "t.getyourticket.in/t/{$orderId}";
-        $whatsappTemplate = WhatsappApi::where('title', 'Online Booking')->first();
-        $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-        $dates = explode(',', $booking->ticket->event->date_range);
-        $formattedDates = [];
-        foreach ($dates as $date) {
-            $formattedDates[] = \Carbon\Carbon::parse($date)->format('d-m-Y');
-        }
-        $dateRangeFormatted = implode(' | ', $formattedDates);
-
-        $eventDateTime = $dateRangeFormatted . ' | ' . $booking->ticket->event->start_time . ' - ' . $booking->ticket->event->end_time;
-
-        $totalQty = 1;
-        $mediaurl = $booking->ticket->event->eventMedia->thumbnail;
-        $data = (object) [
-            'name' => $booking->name,
-            'number' => $booking->number,
-            'templateName' => 'Online Booking Template',
-            'whatsappTemplateData' => $whatsappTemplateName,
-            'mediaurl' => $mediaurl,
-            'shortLink' => $shortLink,
-            'insta_whts_url' => $booking->ticket->event->insta_whts_url ?? 'helloinsta',
-            'values' => [
-                $booking->name,
-                $booking->number,
-                $booking->ticket->event->name,
-                $totalQty,
-                $booking->ticket->name,
-                $booking->ticket->event->venue->address,
-                $eventDateTime,
-                $booking->ticket->event->whts_note ?? 'hello',
-            ],
-            'replacements' => [
-                ':C_Name' => $booking->name,
-                ':T_QTY' => $totalQty,
-                ':Ticket_Name' => $booking->ticket->name,
-                ':Event_Name' => $booking->ticket->event->name,
-                ':Event_DateTime' => $eventDateTime,
-                ':S_Link' => $shortLinksms,
-            ]
-        ];
-
-        $isMasterBooking = $extra['is_master_booking'] ?? false;
-
-        if (!$isMasterBooking && ($data->tickets->quantity ?? 1) == 1) {
-            $this->smsService->send($data);
-            $this->whatsappService->send($data);
-        }
-
-        return $booking;
-    }
-
     public function bookingDataZero($request, $session, $txnid, $setId, $extra = [])
     {
         $ticket = Ticket::findOrFail($request->ticket_id);
@@ -1887,8 +1064,6 @@ class WebhookService
         if (is_string($seats)) {
             $seats = json_decode($seats, true) ?? [];
         }
-
-        Log::info('[bookingDataZero] Seats payload', ['seats' => $seats]);
 
         // 🔥 Transaction શરૂ કરો
         DB::beginTransaction();
@@ -1945,8 +1120,6 @@ class WebhookService
 
             $booking->save();
 
-            Log::info('[Booking] Booking created', ['booking_id' => $booking->id]);
-
             // 🔥 EventSeatStatus create/update
             if (!empty($firstSeat) && !empty($firstSeat['seat_id'])) {
 
@@ -1966,11 +1139,6 @@ class WebhookService
                 // 🔥 Correct booking update
                 $booking->ess_id = $ess->id;
                 $booking->save();
-
-                Log::info('[Booking] Updated with ess_id', [
-                    'booking_id' => $booking->id,
-                    'ess_id' => $ess->id
-                ]);
             } else {
                 Log::warning('[ess] No seat data available', [
                     'booking_id' => $booking->id,
@@ -2022,10 +1190,6 @@ class WebhookService
 
             // 🔥 બધું સફળ થયું, transaction commit કરો
             DB::commit();
-
-            Log::info('[Transaction] Booking transaction committed successfully', [
-                'booking_id' => $booking->id
-            ]);
         } catch (\Exception $e) {
             // 🔥 કોઈ error આવે તો rollback કરો
             DB::rollBack();
@@ -2040,60 +1204,6 @@ class WebhookService
 
         // Load relationships
         $booking->load(['user', 'ticket.event', 'attendee']);
-
-        // SMS/WhatsApp notification logic
-        $orderId = $booking->token ?? '';
-        $shortLink = $orderId;
-        $shortLinksms = "t.getyourticket.in/t/{$orderId}";
-
-        $whatsappTemplate = WhatsappApi::where('title', 'Online Booking')->first();
-        $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
-
-        $dates = explode(',', $booking->ticket->event->date_range);
-        $formattedDates = [];
-        foreach ($dates as $date) {
-            $formattedDates[] = \Carbon\Carbon::parse($date)->format('d-m-Y');
-        }
-        $dateRangeFormatted = implode(' | ', $formattedDates);
-
-        $eventDateTime = $dateRangeFormatted . ' | ' . $booking->ticket->event->start_time . ' - ' . $booking->ticket->event->end_time;
-        $mediaurl = $booking->ticket->event->eventMedia->thumbnail;
-
-        $data = (object) [
-            'name' => $booking->name,
-            'number' => $booking->number,
-            'templateName' => 'Online Booking Template',
-            'whatsappTemplateData' => $whatsappTemplateName,
-            'mediaurl' => $mediaurl,
-            'shortLink' => $shortLink,
-            'insta_whts_url' => $booking->ticket->event->insta_whts_url ?? 'helloinsta',
-            'values' => [
-                $booking->name,
-                $booking->number,
-                $booking->ticket->event->name,
-                1,
-                $booking->ticket->name,
-                $booking->ticket->event->venue->address,
-                $eventDateTime,
-                $booking->ticket->event->whts_note ?? 'hello',
-            ],
-            'replacements' => [
-                ':C_Name' => $booking->name,
-                ':T_QTY' => 1,
-                ':Ticket_Name' => $booking->ticket->name,
-                ':Event_Name' => $booking->ticket->event->name,
-                ':Event_Date' => $eventDateTime,
-                ':S_Link' => $shortLinksms,
-            ]
-        ];
-
-        $isMasterBooking = $extra['is_master_booking'] ?? false;
-
-        if (!$isMasterBooking && ($request->quantity ?? 1) == 1) {
-            $this->smsService->send($data);
-            $this->whatsappService->send($data);
-        }
-
         return $booking;
     }
     public function store(Request $request, $session, $txnid, $setId, $gateway = 'unknown')
@@ -2200,12 +1310,6 @@ class WebhookService
                     'convenience_fee' => $request->totalConvenienceFee ?? 0,
                 ];
 
-                // ✅ Log before storing
-                Log::info('[BookingTax] Incoming tax data before store', [
-                    'request_data' => $request->all(),
-                    'prepared_data' => $bookingTaxData,
-                ]);
-
                 // Then create the record
                 BookingTax::create($bookingTaxData);
             }
@@ -2225,83 +1329,6 @@ class WebhookService
                 'error' => $e->getMessage(),
                 'line' => $e->getLine()
             ], 500);
-        }
-    }
-
-    public function storeEmusment($request, $session, $txnid, $setId = null)
-    {
-        try {
-            $requestData = json_decode($request->requestData);
-
-            $qty = $requestData->tickets->quantity;
-            $bookings = [];
-            $masterBookingData = [];
-            $firstIteration = true;
-            $penddingBookingsMaster = null;
-
-            if ($qty > 0) {
-                for ($i = 0; $i < $qty; $i++) {
-                    $booking = new AmusementPendingBooking();
-                    $booking->ticket_id = $requestData->tickets->id;
-                    $booking->user_id = $requestData->user_id;
-                    $booking->email = $requestData->email;
-                    $booking->name = $requestData->name;
-                    $booking->number = $requestData->number;
-                    $booking->type = $requestData->type;
-                    $booking->payment_method = $requestData->payment_method;
-                    $booking->gateway = $request->gateway;
-
-                    $booking->token = $this->generateHexadecimalCode();
-                    $booking->session_id = $session;
-                    $booking->promocode_id = $request->promo_code;
-                    $booking->txnid = $txnid;
-                    $booking->status = 0;
-                    $booking->payment_status = 0;
-                    $booking->attendee_id = $request->attendees[$i]['id'] ?? null;
-                    $booking->total_tax = $request->total_tax;
-                    $booking->booking_date = $request->booking_date;
-
-
-                    if ($firstIteration) {
-                        $booking->amount = $request->amount ?? 0;
-                        $booking->discount = $request->discount;
-                        $booking->base_amount = $request->base_amount;
-                        $booking->convenience_fee = $request->convenience_fee;
-                        $firstIteration = false;
-                    }
-
-                    $booking->save();
-                    $booking->load(['user', 'ticket.event.user.smsConfig']);
-                    $bookings[] = $booking;
-
-                    $masterBookingData[] = $booking->id;
-                }
-
-                try {
-                    if (count($bookings) > 1) {
-                        $penddingBookingsMaster = new AmusementPendingMasterBooking();
-
-                        $penddingBookingsMaster->booking_id = is_array($masterBookingData) ? json_encode($masterBookingData) : json_encode([$masterBookingData]);
-                        $penddingBookingsMaster->session_id = $session;
-                        $penddingBookingsMaster->user_id = $requestData->user_id;
-                        $penddingBookingsMaster->amount = $request->amount;
-                        $penddingBookingsMaster->order_id = $this->generateHexadecimalCode();
-                        $penddingBookingsMaster->discount = $request->discount;
-                        $penddingBookingsMaster->payment_method = $request->payment_method;
-                        $penddingBookingsMaster->gateway = $request->gateway;
-                        $penddingBookingsMaster->save();
-                    }
-                } catch (\Exception $e) {
-                    return response()->json([
-                        'error' => $e->getMessage(),
-                        'line' => $e->getLine(),
-                        'file' => $e->getFile()
-                    ], 500);
-                }
-            }
-            return response()->json(['status' => true, 'message' => 'Tickets Booked Successfully', 'bookings' => $bookings, 'PenddingBookingsMaster' => $penddingBookingsMaster], 201);
-        } catch (\Exception $e) {
-            return response()->json(['status' => false, 'message' => 'Failed to book tickets', 'error' => $e->getMessage(), 'line' => $e->getLine()], 500);
         }
     }
 

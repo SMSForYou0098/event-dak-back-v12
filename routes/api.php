@@ -18,6 +18,7 @@ Route::prefix('dark')->group(function () {
     Route::middleware(['restrict.ip'])->group(function () {
         // Public General Routes
         require __DIR__ . '/api/public/general.php';
+        require __DIR__ . '/api/protected/ai_keys.php';
 
         Route::middleware(['auth:api'])->group(function () {
             // Auth User Routes (No check.activity)
@@ -30,6 +31,7 @@ Route::prefix('dark')->group(function () {
                 require __DIR__ . '/api/protected/events.php';
                 require __DIR__ . '/api/protected/bookings.php';
                 require __DIR__ . '/api/protected/settings.php';
+                require __DIR__ . '/api/protected/whatsapp.php';
                 require __DIR__ . '/api/protected/content.php';
                 require __DIR__ . '/api/protected/labelPrint.php';
             });

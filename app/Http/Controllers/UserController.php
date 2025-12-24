@@ -40,65 +40,6 @@ class UserController extends Controller
         private UserService $userService
     ) {}
 
-    public function indexlist()
-    {
-        $loggedInUser = Auth::user();
-
-        if ($loggedInUser->hasRole('Admin')) {
-
-            $users = User::with(['roles', 'reportingUser'])->latest()->get();
-        } elseif ($loggedInUser->hasRole('Box Office Manager')) {
-            $organizerId = $loggedInUser->reporting_user ?? $loggedInUser->id;
-
-            $userIds = $this->getAllReportingUserIds($organizerId);
-
-            $users = User::with(['roles', 'reportingUser'])
-                ->whereIn('id', $userIds)
-                ->latest()
-                ->get();
-        } else {
-            $users = User::with(['roles', 'reportingUser'])
-                ->where('reporting_user', $loggedInUser->id)
-                ->latest()->get();
-        }
-
-
-        $allUsers = $users->map(function ($user) {
-            return [
-                'id' => $user->id,
-                'name' => $user->name,
-                'contact' => $user->number,
-                'email' => $user->email,
-                'role_name' => $user->roles->pluck('name')->first(),
-                'status' => $user->staus,
-                'reporting_user' => $user->reportingUser ? $user->reportingUser->name : null,
-                'organisation' => $user->organisation ? $user->organisation : null,
-                'created_at' => $user->created_at,
-                'authentication' => $user->authentication,
-
-            ];
-        });
-        $organizers = User::role('Organizer')->get();
-        $formattedUsers = $users->map(function ($user) {
-            return [
-                'value' => $user->id,
-                'label' => $user->name,
-                'number' => $user->number,
-                'email' => $user->email,
-                'role_name' => $user->roles->pluck('name')->first(),
-            ];
-        });
-        $org = $organizers->map(function ($user) {
-            return [
-                'value' => $user->id,
-                'label' => $user->name,
-                'organisation' => $user->organisation ? $user->organisation : null,
-            ];
-        });
-
-        return response()->json(['status' => true, 'users' => $formattedUsers, 'allData' => $allUsers, 'organizers' => $org]);
-    }
-
     private function getAllReportingUserIds($organizerId)
     {
         $userIds = collect([$organizerId]);
@@ -1259,6 +1200,20 @@ class UserController extends Controller
         return response()->json([
             'status' => true,
             'message' => 'Organizer list fetched successfully.',
+            'data' => $organizers
+        ], 200);
+    }
+
+    public function getOrganizers()
+    {
+        $organizers = User::whereHas('roles', function ($query) {
+            $query->where('name', 'Organizer');
+        })->select('id', 'name', 'organisation')
+            ->get();
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Organizers retrieved successfully.',
             'data' => $organizers
         ], 200);
     }

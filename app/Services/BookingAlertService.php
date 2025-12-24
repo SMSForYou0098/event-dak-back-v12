@@ -5,17 +5,23 @@ namespace App\Services;
 use App\Models\Booking;
 use App\Models\WhatsappApi;
 use Carbon\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 
 class BookingAlertService
 {
     protected $smsService;
     protected $whatsappService;
+    protected $templateService;
 
-    public function __construct(SmsService $smsService, WhatsappService $whatsappService)
-    {
+    public function __construct(
+        SmsService $smsService, 
+        WhatsappService $whatsappService,
+        TemplateReplacementService $templateService
+    ) {
         $this->smsService = $smsService;
         $this->whatsappService = $whatsappService;
+        $this->templateService = $templateService;
     }
 
     /**
@@ -24,53 +30,63 @@ class BookingAlertService
      * This method handles sending alerts for both Agent and POS bookings.
      * Called from SendBookingAlertJob to avoid blocking the main booking request.
      * 
-     * @param array $bookingIds - IDs of bookings to send alerts for
+     * @param array|\Illuminate\Support\Collection $bookingIdsOrCollection - IDs of bookings OR collection of Booking models
      * @param string $bookingType - Type of booking (agent, pos, sponsor, etc.)
      * @return bool - Success status
      */
-    public function sendBookingAlerts(array $bookingIds, string $bookingType = 'agent'): bool
+    public function sendBookingAlerts($bookingIdsOrCollection, string $bookingType = 'agent'): bool
     {
         try {
-            if (empty($bookingIds)) {
-                return false;
+            // Handle both array of IDs and Collection of Booking models
+            if ($bookingIdsOrCollection instanceof Collection) {
+                // Collection of Booking models passed directly (from ResendTicketController)
+                $bookings = $bookingIdsOrCollection;
+                
+                if ($bookings->isEmpty()) {
+                    return false;
+                }
+                
+                $firstBooking = $bookings->first();
+                
+                // Ensure relationships are loaded
+                if (!$firstBooking->relationLoaded('ticket') || !$firstBooking->ticket->relationLoaded('event')) {
+                    $bookingIds = $bookings->pluck('id')->toArray();
+                    $bookings = Booking::with('ticket.event')->whereIn('id', $bookingIds)->get();
+                    $firstBooking = $bookings->first();
+                }
+            } else {
+                // Array of IDs passed (from Job)
+                $bookingIds = $bookingIdsOrCollection;
+                
+                if (empty($bookingIds)) {
+                    return false;
+                }
+
+                // Fetch the first booking with all related data
+                $firstBooking = Booking::with('ticket.event')
+                    ->whereIn('id', $bookingIds)
+                    ->first();
+
+                if (!$firstBooking) {
+                    return false;
+                }
+
+                // Get all bookings for this batch
+                // Get all bookings for this batch
+                $bookings = Booking::whereIn('id', $bookingIds)->get();
             }
-
-            // Fetch the first booking with all related data
-            $firstBooking = Booking::with('ticket.event')
-                ->whereIn('id', $bookingIds)
-                ->first();
-
-            if (!$firstBooking) {
-                return false;
-            }
-
-            // Get all bookings for this batch
-            $bookings = Booking::whereIn('id', $bookingIds)
-                ->get();
 
             $ticket = $firstBooking->ticket;
             $event = $ticket->event;
-
-            // 🔥 Get WhatsApp Template
-            $whatsappTemplate = WhatsappApi::where('title', 'Agent Booking')->first();
-            $whatsappTemplateName = $whatsappTemplate->template_name ?? '';
 
             // 🔥 Determine Order ID (using perfect logic)
             $orderId = $this->resolveOrderId($firstBooking, $bookings);
 
             // 🔥 Build short link
-            $shortLink = "t.getyourticket.in/t/{$orderId}";
-
-            // 🔥 Format dates
-            $dates = explode(',', $event->date_range);
-            $formattedDates = array_map(
-                fn($d) => Carbon::parse($d)->format('d-m-Y'),
-                $dates
-            );
-            $eventDateTime = implode(' | ', $formattedDates) . ' | ' . $event->start_time . ' - ' . $event->end_time;
+            $shortLink = "getyourticket.in/t/{$orderId}";
 
             // 🔥 Build ticket summary
-            $ticketSummary = $bookings
+            $tickets = $bookings
                 ->groupBy('ticket_id')
                 ->map(function ($items) {
                     $ticketName = $items->first()->ticket->name ?? 'Unknown Ticket';
@@ -79,38 +95,46 @@ class BookingAlertService
                 })
                 ->implode(' | ');
 
-            // 🔥 Prepare alert data
-            $alertData = (object) [
-                'name' => $firstBooking->name,
-                'number' => $firstBooking->number,
-                'templateName' => 'Agent Booking Template',
-                'whatsappTemplateData' => $whatsappTemplateName,
-                'shortLink' => $orderId,
-                'insta_whts_url' => $event->insta_whts_url ?? 'helloinsta',
-                'mediaurl' => $event->eventMedia->thumbnail ?? null,
-                'values' => [
-                    $firstBooking->name,
-                    $firstBooking->number,
-                    $event->name,
-                    count($bookings),
-                    $ticketSummary,
-                    $event->venue->address ?? 'TBD',
-                    $eventDateTime,
-                    $event->whts_note ?? 'Welcome!',
-                ],
-                'replacements' => [
-                    ':C_Name' => $firstBooking->name,
-                    ':T_QTY' => count($bookings),
-                    ':Ticket_Name' => $ticketSummary,
-                    ':Event_Name' => $event->name,
-                    ':Event_Date' => $eventDateTime,
-                    ':S_Link' => $shortLink,
-                ],
-            ];
+            // 🔥 Build standardized notification data
+            $notificationData = $this->templateService->buildNotificationData(
+                $firstBooking,
+                $event,
+                [
+                    'qty' => count($bookings),
+                    'short_link' => $shortLink,
+                    'ticket_name' => $tickets,
+                    'venue' => $event->venue->address ?? 'TBD',
+                ]
+            );
+            
+            Log::info('BookingAlertService: Built notification data', [
+                'notification_data' => $notificationData,
+            ]);
+            
+            // 🔥 Prepare WhatsApp data with template-based replacements
+            try {
+                $whatsappData = $this->templateService->prepareWhatsappData($notificationData, 'Agent Booking');
+                Log::info('BookingAlertService: WhatsApp data prepared', [
+                    'whatsapp_data' => $whatsappData,
+                ]);
+            } catch (\Exception $e) {
+                Log::error('BookingAlertService: WhatsApp preparation failed', [
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString()
+                ]);
+                throw $e;
+            }
+            
+            // 🔥 Prepare SMS data with template-based replacements (same template title)
+            $smsData = $this->templateService->prepareSmsData($notificationData, 'Agent Booking');
+            
+            Log::info('BookingAlertService: SMS data prepared', [
+                'sms_data' => $smsData,
+            ]);
 
             // 🔥 Send alerts (non-blocking in job context)
-            $this->smsService->send($alertData);
-            $this->whatsappService->send($alertData);
+            $this->smsService->send($smsData);
+            $this->whatsappService->send($whatsappData);
 
             return true;
         } catch (\Exception $e) {

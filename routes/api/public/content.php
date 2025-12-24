@@ -60,17 +60,7 @@ Route::post('successfulEvent-update/{id}', [SuccessfulEventController::class, 'u
 Route::delete('successfulEvent-destroy/{id}', [SuccessfulEventController::class, 'destroy']);
 Route::get('expired-events', [SuccessfulEventController::class, 'getExpiredEvents']);
 
-// whatsapp configuration dynamic
-Route::get('whatsapp-config-show/{id}', [WhatsappConfigurationsController::class, 'show']);
-Route::post('whatsapp-config-store/{id}', [WhatsappConfigurationsController::class, 'store']);
-Route::delete('whatsapp-config-destroy/{id}', [WhatsappConfigurationsController::class, 'destroy']);
-Route::get('whatsapp-api-show', [WhatsappConfigurationsController::class, 'listData']);
-Route::get('whatsapp-api-show/{id}', [WhatsappConfigurationsController::class, 'list']);
-Route::post('whatsapp-api-store', [WhatsappConfigurationsController::class, 'storeApi']);
-Route::post('whatsapp-api-update/{id}', [WhatsappConfigurationsController::class, 'updateApi']);
-Route::delete('whatsapp-api-destroy/{id}', [WhatsappConfigurationsController::class, 'deleteApi']);
-Route::get('whatsapp-api/{id}/{title}', [WhatsappConfigurationsController::class, 'whatsappData']);
-Route::get('whatsapp-apiData/{title}', [WhatsappConfigurationsController::class, 'whatsappTitleData']);
+
 
 //
 Route::post('/complimentary-booking/check/users', [ComplimentaryBookingController::class, 'checkUsers']);
@@ -105,8 +95,6 @@ Route::post('/attendees/update/{id}', [AttndyController::class, 'attndyUpdate'])
 Route::get('/attendee-list/{userId}/{event_id}', [AttndyController::class, 'attendyList']);
 
 //eazebuzz
-Route::get('/getSponsorsImages', [SettingController::class, 'getSponsorsImages']);
-Route::get('/getPcSponsorsImages', [SettingController::class, 'getPcSponsorsImages']);
 Route::get('pages-get-title', [PagesController::class, 'getTitle']);
 Route::get('pages-title/{title}', [PagesController::class, 'pageTitle']);
 Route::post('/footer-data', [SettingController::class, 'footerData']);

@@ -19,6 +19,7 @@ use App\Http\Controllers\VanueController;
 use Illuminate\Support\Facades\Route;
 
 //eventroutes
+Route::get('/events/active', [EventController::class, 'activeEvents']);
 Route::get('pos-events/{id}', [EventController::class, 'eventByUser']);
 Route::get('events/list/{id}', [EventController::class, 'eventList'])->middleware('permission:View Event');
 Route::get('event-ticket-info/{id}', [EventController::class, 'info']);

@@ -121,7 +121,10 @@ class EventController extends Controller
     public function junk()
     {
         $today = Carbon::today()->toDateString();
-        $events = Event::onlyTrashed()->where('status', 1)
+        $events = Event::onlyTrashed()
+            ->whereHas('eventControls', function ($q) {
+                $q->where('status', 1);
+            })
             ->where(function ($query) use ($today) {
                 // Check for single-day events or multi-day events
                 $query->where(function ($subQuery) use ($today) {
@@ -275,7 +278,6 @@ class EventController extends Controller
             'pos' => 'pos_booking',
             'complimentary' => 'complimentary_booking',
             'exhibition' => 'exhibition_booking',
-            'amusement' => 'amusement_booking',
             default => null
         };
 
@@ -924,7 +926,6 @@ class EventController extends Controller
             'pos_booking',
             'complimentary_booking',
             'exhibition_booking',
-            'amusement_booking',
             'accreditation_booking',
             'sponsor_booking',
             'show_on_home',
@@ -1125,7 +1126,6 @@ class EventController extends Controller
             'pos' => 'pos_booking',
             'complimentary' => 'complimentary_booking',
             'exhibition' => 'exhibition_booking',
-            'amusement' => 'amusement_booking',
         ];
 
         if ($bookingType && isset($bookingTypeFields[$bookingType])) {
@@ -1360,7 +1360,9 @@ class EventController extends Controller
         // Fetch events and calculate if they are past
         $events = $eventsQuery
             ->select('id', 'user_id', 'category', 'name', 'date_range', 'created_at', 'event_type', 'event_key')
-            ->where('status', 1)
+            ->whereHas('eventControls', function ($q) {
+                $q->where('status', 1);
+            })
             ->with(['tickets:id,event_id,price,sale_price', 'user:id,name', 'Category:id,title'])
             ->orderBy('created_at', 'desc')
             ->get();
@@ -2071,6 +2073,37 @@ class EventController extends Controller
             return response()->json([
                 'status' => false,
                 'message' => 'Error deleting event: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+
+    public function activeEvents()
+    {
+        try {
+            $events = Event::select('id', 'name', 'event_key', 'user_id')
+                ->whereHas('eventControls', function ($query) {
+                    $query->where('status', 1);
+                })
+                ->orderBy('created_at', 'desc')
+                ->get();
+
+            if ($events->isEmpty()) {
+                return response()->json([
+                    'status' => true,
+                    'message' => 'No active events found',
+                    'events' => []
+                ], 200);
+            }
+
+            return response()->json([
+                'status' => true,
+                'events' => $events
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Error fetching active events: ' . $e->getMessage()
             ], 500);
         }
     }

@@ -13,7 +13,6 @@ use App\Http\Controllers\PosController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\ResendTicketController;
 use App\Http\Controllers\ScanController;
-use App\Http\Controllers\SponsorBookingController;
 use App\Http\Controllers\TicketController;
 use App\Http\Controllers\SeatLockController;
 use Illuminate\Support\Facades\Route;
@@ -34,7 +33,7 @@ Route::post('booking-mail/{id}', [BookingController::class, 'sendBookingMail']);
 Route::get('bookings/{type}/{id}', [BookingController::class, 'list']);
 Route::get('agent-bookings/{id}', [BookingController::class, 'agentBooking']);
 Route::get('sponsor-bookings/{id}', [BookingController::class, 'sponsorBooking']);
-Route::post('/resend', [BookingController::class, 'resend']);
+
 Route::delete('delete-booking/{id}/{token}', [BookingController::class, 'destroy']);
 Route::get('restore-booking/{id}/{token}', [BookingController::class, 'restoreBooking']);
 Route::get('user-bookings/{userId}', [BookingController::class, 'getUserBookings']);
@@ -55,13 +54,7 @@ Route::get('user-form-number/{id}', [AgentController::class, 'userFormNumber']);
 Route::get('restore/{type}/{token}', [AgentController::class, 'restoreBooking']);
 Route::delete('disable/{type}/{token}', [AgentController::class, 'destroy']);
 
-//sponsor booking
-Route::post('sponsor-book-ticket/{id}', [SponsorBookingController::class, 'store']);
-Route::post('sponsor-master-booking/{id}', [SponsorBookingController::class, 'sponsorMaster']);
-Route::get('sponsor/list/{id}', [SponsorBookingController::class, 'list'])->middleware('permission:View Sponsor Bookings');
-// Route::get('user-form-number/{id}', [SponsorBookingController::class, 'userFormNumber']);
-Route::get('sponsor-restore-booking/{token}', [SponsorBookingController::class, 'restoreBooking']);
-Route::delete('sponsor-delete-booking/{token}', [SponsorBookingController::class, 'destroy']);
+
 
 //pos
 Route::post('booking/pos', [PosController::class, 'create']);
@@ -115,7 +108,6 @@ Route::get('corporate/ex-user/{number}', [CorporateBookingController::class, 'co
 Route::post('/export-onlineBooking', [BookingController::class, 'export'])->middleware('permission:Export Online Bookings');
 Route::post('/export-attndy/{event_id}', [AttndyController::class, 'export'])->middleware('permission:Export Attendees');
 Route::post('/export-agentBooking', [AgentController::class, 'export'])->middleware('permission:Export Agent Bookings');
-Route::post('/export-sponsorBooking', [SponsorBookingController::class, 'export'])->middleware('permission:Export Sponsor Bookings');
 Route::post('/export-posBooking', [PosController::class, 'export'])->middleware('permission:Export POS Bookings');
 Route::post('/export-corporateBooking', [CorporateBookingController::class, 'export']);
 Route::post('/export-complimentaryBooking', [ComplimentaryBookingController::class, 'export']);

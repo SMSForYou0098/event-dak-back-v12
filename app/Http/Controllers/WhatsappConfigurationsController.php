@@ -13,7 +13,7 @@ class WhatsappConfigurationsController extends Controller
 
     public function show($id)
     {
-        $config = WhatsappConfigurations::where('user_id', $id)->first();
+        $config = WhatsappConfigurations::first();
 
         if (!$config) {
             return response()->json(['message' => 'Configuration not found'], 404);
@@ -22,24 +22,46 @@ class WhatsappConfigurationsController extends Controller
         return response()->json(['status' => true, 'message' => 'Configuration  successfully!', 'data' => $config], 200);
     }
 
-    public function store(Request $request, $id)
+    public function store(Request $request)
     {
         try {
+            // Check if user is Admin
+            $user = Auth::user();
+            
+            if (!$user->hasRole('Admin')) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Unauthorized. Only Admin can configure WhatsApp settings.'
+                ], 403);
+            }
 
             $validated = $request->validate([
-                'api_key' => 'nullable|string',
+                'api_key' => 'required|string',
             ]);
 
+            // Always update or create single entry for the admin
             $config = WhatsappConfigurations::updateOrCreate(
-                ['user_id' => $id],
-                [
-                    'api_key' => $validated['api_key'],
-                ]
+                ['user_id' => $user->id], // Find by user_id
+                ['api_key' => $validated['api_key']] // Update api_key
             );
 
-            return response()->json(['status' => true, 'message' => 'Configuration saved successfully!', 'data' => $config], 200);
+            return response()->json([
+                'status' => true,
+                'message' => 'WhatsApp configuration saved successfully!',
+                'data' => $config
+            ], 200);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Validation failed',
+                'errors' => $e->errors()
+            ], 422);
         } catch (\Exception $e) {
-            return response()->json(['status' => false, 'message' => 'Failed to create user', 'error' => $e->getMessage()], 500);
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to save configuration',
+                'error' => $e->getMessage()
+            ], 500);
         }
     }
 

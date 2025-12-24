@@ -11,16 +11,27 @@ use App\Models\PromoCode;
 use App\Models\TicketHistory;
 use Storage;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\Schema;
 
 class TicketController extends Controller
 {
 
-    public function index($id)
+    public function index(Request $request, $id)
     {
         try {
+            // ✅ Parse requested fields from query parameter
+            $requestedFields = null;
+            if ($request->has('fields')) {
+                $fieldsParam = $request->input('fields');
+                $requestedFields = array_map('trim', explode(',', $fieldsParam));
+                
+                // Always include 'id' if fields are specified for proper identification
+                if (!in_array('id', $requestedFields)) {
+                    array_unshift($requestedFields, 'id');
+                }
+            }
+
             if (!is_numeric($id)) {
-                $event = Event::where('event_key', $id)->first();
+                $event = Event::where('event_key', $id)->select('id')->first();
 
                 if (!$event) {
                     return response()->json([
@@ -29,11 +40,23 @@ class TicketController extends Controller
                     ], 404);
                 }
 
-                $tickets = Ticket::where('event_id', $event->id)
-                    ->get();
+                $query = Ticket::where('event_id', $event->id);
+                
+                // ✅ Apply field selection if specified
+                if ($requestedFields) {
+                    $query->select($requestedFields);
+                }
+                
+                $tickets = $query->get();
             } else {
-                $tickets = Ticket::where('event_id', $id)
-                    ->get();
+                $query = Ticket::where('event_id', $id);
+                
+                // ✅ Apply field selection if specified
+                if ($requestedFields) {
+                    $query->select($requestedFields);
+                }
+                
+                $tickets = $query->get();
             }
 
             // ✅ Check if we got any tickets
@@ -44,50 +67,69 @@ class TicketController extends Controller
                 ], 200);
             }
 
-            // ✅ Add on_sale and lowest_sale_price logic (per event)
-            $hasSale = $tickets->contains(function ($ticket) {
-                return $this->boolValue($ticket->sale ?? false);
-            });
+            // ✅ Only compute sale logic if sale-related fields are requested or no fields filter is applied
+            $shouldComputeSale = !$requestedFields || 
+                                 in_array('sale', $requestedFields) || 
+                                 in_array('sale_price', $requestedFields) ||
+                                 in_array('sale_date', $requestedFields);
 
-            $lowest_sale_price = 0;
-            $on_sale = false;
+            if ($shouldComputeSale) {
+                // ✅ Add on_sale and lowest_sale_price logic (per event)
+                $hasSale = $tickets->contains(function ($ticket) {
+                    return $this->boolValue($ticket->sale ?? false);
+                });
 
-            if ($hasSale) {
-                $today = Carbon::today();
-                $validSaleTickets = collect();
+                $lowest_sale_price = 0;
+                $on_sale = false;
 
-                foreach ($tickets as $ticket) {
-                    if ($this->boolValue($ticket->sale ?? false) && !empty($ticket->sale_date)) {
-                        $dates = array_map('trim', explode(',', $ticket->sale_date));
+                if ($hasSale) {
+                    $today = Carbon::today();
+                    $validSaleTickets = collect();
 
-                        if (count($dates) === 1) {
-                            $startDate = Carbon::parse($dates[0])->startOfDay();
-                            $endDate = Carbon::parse($dates[0])->endOfDay();
-                        } else {
-                            $startDate = Carbon::parse($dates[0])->startOfDay();
-                            $endDate = Carbon::parse($dates[1])->endOfDay();
+                    foreach ($tickets as $ticket) {
+                        if ($this->boolValue($ticket->sale ?? false) && !empty($ticket->sale_date)) {
+                            $dates = array_map('trim', explode(',', $ticket->sale_date));
+
+                            if (count($dates) === 1) {
+                                $startDate = Carbon::parse($dates[0])->startOfDay();
+                                $endDate = Carbon::parse($dates[0])->endOfDay();
+                            } else {
+                                $startDate = Carbon::parse($dates[0])->startOfDay();
+                                $endDate = Carbon::parse($dates[1])->endOfDay();
+                            }
+
+                            if (
+                                $today->toDateString() == $startDate->toDateString() ||
+                                ($today->greaterThanOrEqualTo($startDate) && $today->lessThanOrEqualTo($endDate))
+                            ) {
+                                $validSaleTickets->push($ticket);
+                            }
                         }
+                    }
 
-                        if (
-                            $today->toDateString() == $startDate->toDateString() ||
-                            ($today->greaterThanOrEqualTo($startDate) && $today->lessThanOrEqualTo($endDate))
-                        ) {
-                            $validSaleTickets->push($ticket);
-                        }
+                    if ($validSaleTickets->isNotEmpty()) {
+                        $lowest_sale_price = $validSaleTickets->min('sale_price');
+                        $on_sale = true;
                     }
                 }
 
-                if ($validSaleTickets->isNotEmpty()) {
-                    $lowest_sale_price = $validSaleTickets->min('sale_price');
-                    $on_sale = true;
+                // ✅ Add computed fields
+                foreach ($tickets as $ticket) {
+                    $ticket->on_sale = $on_sale;
+                    $ticket->lowest_sale_price = $lowest_sale_price;
                 }
             }
 
-            // ✅ Add computed fields and optionally hide internal fields
-            foreach ($tickets as $ticket) {
-                $ticket->on_sale = $on_sale;
-                $ticket->lowest_sale_price = $lowest_sale_price;
+            // ✅ Filter response to only requested fields if specified
+            if ($requestedFields) {
+                $tickets = $tickets->map(function ($ticket) use ($requestedFields, $shouldComputeSale) {
+                    $filtered = collect($ticket->toArray())
+                        ->only(array_merge($requestedFields, $shouldComputeSale ? ['on_sale', 'lowest_sale_price'] : []))
+                        ->all();
+                    return $filtered;
+                });
             }
+
             return response()->json([
                 'status' => true,
                 'tickets' => $tickets

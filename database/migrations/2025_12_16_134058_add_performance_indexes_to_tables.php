@@ -116,15 +116,15 @@ return new class extends Migration
             }
         });
 
-        // Attendees table indexes
-        Schema::table('attndies', function (Blueprint $table) use ($indexExists) {
-            if (!$indexExists('attndies', 'idx_attendees_email')) {
-                $table->index('email', 'idx_attendees_email');
-            }
-            if (!$indexExists('attndies', 'idx_attendees_number')) {
-                $table->index('number', 'idx_attendees_number');
-            }
-        });
+        // Attendees table indexes - SKIPPED: email and number columns don't exist in attndies table
+        // Schema::table('attndies', function (Blueprint $table) use ($indexExists) {
+        //     if (!$indexExists('attndies', 'idx_attendees_email')) {
+        //         $table->index('email', 'idx_attendees_email');
+        //     }
+        //     if (!$indexExists('attndies', 'idx_attendees_number')) {
+        //         $table->index('number', 'idx_attendees_number');
+        //     }
+        // });
 
         // Payment Logs table indexes
         Schema::table('payment_logs', function (Blueprint $table) use ($indexExists) {
@@ -198,11 +198,11 @@ return new class extends Migration
             $table->dropIndex('idx_pos_created');
         });
 
-        // Drop indexes from attndies
-        Schema::table('attndies', function (Blueprint $table) {
-            $table->dropIndex('idx_attendees_email');
-            $table->dropIndex('idx_attendees_number');
-        });
+        // Drop indexes from attndies - SKIPPED: indexes were not created
+        // Schema::table('attndies', function (Blueprint $table) {
+        //     $table->dropIndex('idx_attendees_email');
+        //     $table->dropIndex('idx_attendees_number');
+        // });
 
         // Drop indexes from payment_logs
         Schema::table('payment_logs', function (Blueprint $table) {

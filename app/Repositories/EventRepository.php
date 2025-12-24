@@ -126,7 +126,6 @@ class EventRepository
             'pos' => 'pos_booking',
             'complimentary' => 'complimentary_booking',
             'exhibition' => 'exhibition_booking',
-            'amusement' => 'amusement_booking',
         ];
 
         if (isset($bookingTypeFields[$bookingType])) {

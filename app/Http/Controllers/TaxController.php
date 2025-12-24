@@ -9,7 +9,12 @@ class TaxController extends Controller
 {
     public function index($id)
     {
-        $taxes = Tax::where('user_id', $id)->firstOrFail();
+        $taxes = Tax::where('user_id', $id)->first();
+        
+        if (!$taxes) {
+            return response()->json(['message' => 'No tax records found for the specified user'], 404);
+        }
+        
         return response()->json([
             'message' => 'Successfully retrieved tax records',
             'taxes' => $taxes

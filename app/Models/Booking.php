@@ -11,6 +11,8 @@ class Booking extends Model
 {
     use HasFactory, SoftDeletes;
 
+    protected $guarded = [];
+
     public function ticket()
     {
         return $this->belongsTo(Ticket::class)->whereNull('deleted_at');

@@ -32,7 +32,6 @@ class AuthController extends Controller
         try {
 
             $loginCredential = $request->input('data');
-            //return $loginCredential;
             $userIp = $request->ip();
             $loginTime = now();
             if ($this->isSuspiciousInput($loginCredential)) {
@@ -138,7 +137,7 @@ class AuthController extends Controller
         //return $apiKey;
         $templateID = $templateData?->template_id;
         $message = $templateData?->content;
-        $finalMessage = str_replace(':OTP', $otp, $message);
+        $finalMessage = str_replace('{{otp}}', $otp, $message);
         //  $message = "Please use this OTP : " . $otp . " to continue on login \nSevak Trust\nGet Your Ticket\nSMS4U";
         $encodedMessage = urlencode($finalMessage);
         $modifiedNumber = $this->modifyNumber($number);
@@ -148,7 +147,7 @@ class AuthController extends Controller
         try {
             $client = new Client();
             $response = $client->request('GET', $otpApi);
-            $this->sendTemplateEmail('Login Tempplate', $email, [':OTP:' => $otp]);
+            $this->sendTemplateEmail('Login Tempplate', $email, ['{{otp}}' => $otp]);
             $responseBody = json_decode($response->getBody(), true);
             $cacheKey = 'otp_' . $loginCredential;
             Cache::put($cacheKey, $otp, now()->addMinutes(5));

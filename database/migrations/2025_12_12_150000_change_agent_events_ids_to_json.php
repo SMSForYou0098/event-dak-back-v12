@@ -22,8 +22,26 @@ return new class extends Migration
     public function down(): void
     {
         // Revert JSON back to previous column types
-        DB::statement("ALTER TABLE agent_events ALTER COLUMN event_id TYPE BIGINT USING (event_id::text)::BIGINT");
-        DB::statement("ALTER TABLE agent_events ALTER COLUMN ticket_id TYPE TEXT USING ticket_id::text");
+        // For event_id: Extract first element from JSON array if it's an array, otherwise use the value as-is
+        DB::statement("
+            ALTER TABLE agent_events 
+            ALTER COLUMN event_id TYPE BIGINT 
+            USING CASE 
+                WHEN event_id IS NULL THEN NULL
+                WHEN jsonb_typeof(event_id::jsonb) = 'array' THEN (event_id::jsonb->0)::text::BIGINT
+                ELSE (event_id::text)::BIGINT
+            END
+        ");
+
+        // For ticket_id: Convert JSON to text representation
+        DB::statement("
+            ALTER TABLE agent_events 
+            ALTER COLUMN ticket_id TYPE TEXT 
+            USING CASE 
+                WHEN ticket_id IS NULL THEN NULL
+                ELSE ticket_id::text
+            END
+        ");
 
         Schema::table('agent_events', function (Blueprint $table) {
             $table->unsignedBigInteger('event_id')->nullable()->default(null)->change();

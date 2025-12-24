@@ -130,15 +130,19 @@ class EventContactController extends Controller
         $queries = [];
         $dateConditions = $this->buildDateConditions($dateRange);
 
-        // Base conditions
-        $baseConditions = function ($query) use ($eventId, $dateConditions, $bookingTypes, $table) {
-            $query->where("{$table}.event_id", $eventId);
+        // User numbers
+        if ($type === 'user' || $type === 'both') {
+            // From users table via relationship (cast bigint to text for PostgreSQL)
+            $userQuery = DB::table($table)
+                ->join('users', "{$table}.user_id", '=', 'users.id')
+                ->where("{$table}.event_id", $eventId)
+                ->whereNotNull('users.number');
 
             if ($dateConditions) {
                 if (isset($dateConditions['single'])) {
-                    $query->whereDate("{$table}.created_at", $dateConditions['single']);
+                    $userQuery->whereDate("{$table}.created_at", $dateConditions['single']);
                 } else {
-                    $query->whereBetween("{$table}.created_at", [
+                    $userQuery->whereBetween("{$table}.created_at", [
                         $dateConditions['start'],
                         $dateConditions['end']
                     ]);
@@ -146,39 +150,57 @@ class EventContactController extends Controller
             }
 
             if ($bookingTypes && $table === 'bookings') {
-                $query->whereIn("{$table}.booking_type", $bookingTypes);
+                $userQuery->whereIn("{$table}.booking_type", $bookingTypes);
             }
-        };
 
-        // User numbers
-        if ($type === 'user' || $type === 'both') {
-            // From users table via relationship
-            $queries[] = DB::table($table)
-                ->join('users', "{$table}.user_id", '=', 'users.id')
-                ->where(function ($q) use ($baseConditions) {
-                    $baseConditions($q);
-                })
-                ->whereNotNull('users.number')
-                ->select('users.number');
+            $queries[] = clone $userQuery->selectRaw('CAST(users.number AS TEXT) as number');
 
-            // Direct number on booking
-            $queries[] = DB::table($table)
-                ->where(function ($q) use ($baseConditions) {
-                    $baseConditions($q);
-                })
-                ->whereNotNull("{$table}.number")
-                ->select("{$table}.number");
+            // Direct number on booking (already varchar, but cast for consistency)
+            $bookingQuery = DB::table($table)
+                ->where("{$table}.event_id", $eventId)
+                ->whereNotNull("{$table}.number");
+
+            if ($dateConditions) {
+                if (isset($dateConditions['single'])) {
+                    $bookingQuery->whereDate("{$table}.created_at", $dateConditions['single']);
+                } else {
+                    $bookingQuery->whereBetween("{$table}.created_at", [
+                        $dateConditions['start'],
+                        $dateConditions['end']
+                    ]);
+                }
+            }
+
+            if ($bookingTypes && $table === 'bookings') {
+                $bookingQuery->whereIn("{$table}.booking_type", $bookingTypes);
+            }
+
+            $queries[] = clone $bookingQuery->selectRaw("CAST({$table}.number AS TEXT) as number");
         }
 
         // Attendee numbers
         if ($type === 'attendee' || $type === 'both') {
-            $queries[] = DB::table($table)
-                ->join('attendees', "{$table}.attendee_id", '=', 'attendees.id')
-                ->where(function ($q) use ($baseConditions) {
-                    $baseConditions($q);
-                })
-                ->whereNotNull('attendees.number')
-                ->select('attendees.number');
+            $attendeeQuery = DB::table($table)
+                ->join('attndies', "{$table}.attendee_id", '=', 'attndies.id')
+                ->where("{$table}.event_id", $eventId)
+                ->whereNotNull('attndies.number');
+
+            if ($dateConditions) {
+                if (isset($dateConditions['single'])) {
+                    $attendeeQuery->whereDate("{$table}.created_at", $dateConditions['single']);
+                } else {
+                    $attendeeQuery->whereBetween("{$table}.created_at", [
+                        $dateConditions['start'],
+                        $dateConditions['end']
+                    ]);
+                }
+            }
+
+            if ($bookingTypes && $table === 'bookings') {
+                $attendeeQuery->whereIn("{$table}.booking_type", $bookingTypes);
+            }
+
+            $queries[] = clone $attendeeQuery->selectRaw('CAST(attndies.number AS TEXT) as number');
         }
 
         return $queries;
@@ -204,13 +226,30 @@ class EventContactController extends Controller
 
     private function combineQueries(array $queries)
     {
-        $first = array_shift($queries);
-
-        foreach ($queries as $query) {
-            $first->union($query);
+        if (empty($queries)) {
+            return null;
         }
 
-        return $first;
+        if (count($queries) === 1) {
+            return $queries[0];
+        }
+
+        // Get SQL and bindings from each query
+        $sqlParts = [];
+        $allBindings = [];
+
+        foreach ($queries as $query) {
+            $sqlParts[] = '(' . $query->toSql() . ')';
+            $allBindings = array_merge($allBindings, $query->getBindings());
+        }
+
+        // Combine with UNION
+        $combinedSql = implode(' UNION ', $sqlParts);
+
+        // Create a new query with the combined SQL and all bindings
+        return DB::table(DB::raw("({$combinedSql}) as union_query"))
+            ->mergeBindings(DB::query()->setBindings($allBindings))
+            ->select('number');
     }
 
     /**
