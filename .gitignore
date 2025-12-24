@@ -4,6 +4,7 @@
 /vendor/
 .env
 .env.*
+.env_docker
 !.env.example
 
 # Laravel storage & cache
